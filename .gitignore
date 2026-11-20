@@ -1,0 +1,40 @@
+# Gradle
+.gradle/
+build/
+*/build/
+*/.cxx/
+
+# Kotlin
+.kotlin/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+local.properties
+
+# Built artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Signing (never commit real keystores)
+*.jks
+*.keystore
+!debug.keystore
+
+# Native build outputs
+.cxx/
+*.so
+!src/main/**/*.so
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example

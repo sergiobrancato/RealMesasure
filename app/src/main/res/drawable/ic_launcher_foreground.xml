@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive launcher foreground: digital caliper jaws framing a hex bolt.
+     The artwork is authored in a 1024x1024 space (matching the project SVG
+     sources) and scaled into the 108dp adaptive safe zone by the group
+     transform below (scale about the 512,512 pivot, then translate). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.0675"
+        android:scaleY="0.0675"
+        android:pivotX="512"
+        android:pivotY="512"
+        android:translateX="-458"
+        android:translateY="-458">
+
+        <!-- Caliper beam -->
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M172,206h680v42h-680z" />
+
+        <!-- Fixed + sliding jaws -->
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M210,248h46v312h-46z" />
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M768,248h46v312h-46z" />
+
+        <!-- Jaw feet -->
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M256,516h140v44h-140z" />
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M628,516h140v44h-140z" />
+
+        <!-- Digital readout -->
+        <path
+            android:fillColor="#151921"
+            android:pathData="M382,272h260v112h-260z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M410,300h52v20h-52z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M476,300h52v20h-52z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M542,300h52v20h-52z" />
+        <path
+            android:fillColor="#25303F"
+            android:pathData="M410,344h184v8h-184z" />
+
+        <!-- Threaded shaft -->
+        <path
+            android:fillColor="#38BDF8"
+            android:fillAlpha="0.92"
+            android:pathData="M482,648h60v232h-60z" />
+        <path
+            android:fillColor="#0B0D10"
+            android:fillAlpha="0.60"
+            android:pathData="M490,676h34v8h-34z M490,708h34v8h-34z M490,740h34v8h-34z M490,772h34v8h-34z M490,804h34v8h-34z M490,836h34v8h-34z" />
+
+        <!-- Hex bolt head -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M512,418L624,482L624,610L512,674L400,610L400,482Z" />
+        <path
+            android:fillColor="#7DD3FC"
+            android:fillAlpha="0.50"
+            android:pathData="M512,418L624,482L512,546L400,482Z" />
+        <path
+            android:fillColor="#0B0D10"
+            android:pathData="M512,492L582,532L582,612L512,652L442,612L442,532Z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:fillAlpha="0.22"
+            android:pathData="M512,492L582,532L512,572L442,532Z" />
+
+        <!-- Measurement line + end ticks -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M300,936h424v10h-424z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M295,918h10v44h-10z M719,918h10v44h-10z" />
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M385,926h7v28h-7z M470,932h7v16h-7z M555,932h7v16h-7z M640,926h7v28h-7z" />
+
+        <!-- End squares -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M287,927h26v26h-26z M711,927h26v26h-26z" />
+    </group>
+</vector>

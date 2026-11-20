@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material dark theme: Compose draws everything on top.
+         windowBackground stays #0B0D10 so the area behind the system bars
+         (edge-to-edge is enforced when targeting SDK 35) is dark too. -->
+    <style name="Theme.RealMeasure" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/workshop_background</item>
+        <item name="android:statusBarColor">@color/workshop_background</item>
+        <item name="android:navigationBarColor">@color/workshop_background</item>
+    </style>
+</resources>

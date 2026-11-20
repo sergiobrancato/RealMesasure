@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RealMeasure</string>
+    <string name="camera_permission_title">Camera access needed</string>
+    <string name="camera_permission_body">RealMeasure uses the rear camera to calibrate against a bank/ID card and measure screws, bolts and hex keys. Photos never leave your device.</string>
+    <string name="camera_permission_settings_hint">If the system no longer shows a prompt, enable Camera for RealMeasure in Settings.</string>
+</resources>
