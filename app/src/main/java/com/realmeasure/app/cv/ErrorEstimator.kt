@@ -89,6 +89,47 @@ object ErrorEstimator {
         epsilonCal: Double,
     ): Double = linearError(diameterMm, nativePxPerMm, referenceWidthMm, epsilonCal)
 
+    // ------------------------------------------------------------------
+    // Optional 3D height parallax correction
+    // ------------------------------------------------------------------
+
+    /**
+     * k = 1 - h / H_cam
+     *
+     * A tall object's top face is closer to the camera than the reference
+     * plane, so its apparent size is magnified relative to the flat footprint.
+     * Multiplying the apparent linear measurements by k (and areas by k²)
+     * removes that first-order parallax bias for the standard handheld
+     * distance [AppConfig.ErrorModel.CAMERA_DISTANCE_MM].
+     */
+    fun parallaxFactor(
+        heightMm: Double,
+        cameraDistanceMm: Double = AppConfig.ErrorModel.CAMERA_DISTANCE_MM,
+    ): Double {
+        if (cameraDistanceMm <= 0.0) return 1.0
+        return (1.0 - heightMm / cameraDistanceMm).coerceIn(0.05, 1.0)
+    }
+
+    /** D_true = D_apparent × k */
+    fun correctLength(apparentMm: Double, heightMm: Double): Double =
+        apparentMm * parallaxFactor(heightMm)
+
+    /** A_true = A_apparent × k² */
+    fun correctArea(apparentArea: Double, heightMm: Double): Double {
+        val k = parallaxFactor(heightMm)
+        return apparentArea * k * k
+    }
+
+    /** Linear error margins scale with the same k as the dimension. */
+    fun correctLinearError(apparentErrorMm: Double, heightMm: Double): Double =
+        apparentErrorMm * parallaxFactor(heightMm)
+
+    /** Area error margins scale with k², like the area itself. */
+    fun correctAreaError(apparentError: Double, heightMm: Double): Double {
+        val k = parallaxFactor(heightMm)
+        return apparentError * k * k
+    }
+
     /** Precision badge from the longer bounding-box dimension's δL. */
     fun quality(lengthErrorMm: Double, mode: ReferenceMode): MeasurementQuality {
         val model = AppConfig.ErrorModel

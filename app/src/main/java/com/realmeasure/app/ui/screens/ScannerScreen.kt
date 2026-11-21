@@ -265,7 +265,7 @@ private fun GuidancePill(scan: ScanUiState) {
                 else -> WorkshopPalette.Amber
             }
         }
-        ScanUiState.Analyzing -> {
+        is ScanUiState.Analyzing -> {
             message = "Flattening scene · tracing contours…"
             accent = WorkshopPalette.Cyan
         }
@@ -318,8 +318,8 @@ private fun CameraStage(
     scanState: ScanUiState,
     torchOn: Boolean,
     onFrame: (Bitmap) -> Unit,
-    onStill: (Bitmap) -> Unit,
-    onCaptureFailed: (String) -> Unit,
+    onStill: (Bitmap, Long) -> Unit,
+    onCaptureFailed: (String, Long) -> Unit,
     onTorch: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -364,6 +364,7 @@ private fun CameraStage(
             .build()
     }
     val lastAnalyzedAt = remember { AtomicLong(0L) }
+    val isFrameBusy = remember { AtomicBoolean(false) }
     val capturing = remember { AtomicBoolean(false) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
@@ -389,22 +390,24 @@ private fun CameraStage(
                 .build()
                 .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-            imageAnalysis.setAnalyzer(analysisExecutor) { proxy ->
-                if (latestScanState.value !is ScanUiState.Scanning) {
-                    proxy.close()
-                    return@setAnalyzer
-                }
-                val now = SystemClock.elapsedRealtime()
-                if (now - lastAnalyzedAt.get() < AppConfig.Detection.FRAME_INTERVAL_MS) {
-                    proxy.close()
-                    return@setAnalyzer
-                }
-                lastAnalyzedAt.set(now)
+            imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                imageProxy.use { proxy ->
+                    if (latestScanState.value !is ScanUiState.Scanning) return@use
+                    if (!isFrameBusy.compareAndSet(false, true)) return@use
+                    try {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastAnalyzedAt.get() < AppConfig.Detection.FRAME_INTERVAL_MS) {
+                            return@use
+                        }
+                        lastAnalyzedAt.set(now)
 
-                val frame = proxy.toUprightStageBitmap()
-                proxy.close()
-                if (frame != null) {
-                    latestOnFrame.value(frame)
+                        val frame = proxy.toUprightStageBitmap()
+                        if (frame != null) {
+                            latestOnFrame.value(frame)
+                        }
+                    } finally {
+                        isFrameBusy.set(false)
+                    }
                 }
             }
 
@@ -425,33 +428,38 @@ private fun CameraStage(
         camera?.cameraControl?.enableTorch(torchOn)
     }
 
-    // Full-resolution capture triggered by the stability lock. This is driven
-    // by the state itself (not a separate event) so a request can never race a
-    // stale composition.
+    // Full-resolution capture triggered by the stability lock.
     val latestOnStill = rememberUpdatedState(onStill)
     val latestOnCaptureFailed = rememberUpdatedState(onCaptureFailed)
     LaunchedEffect(scanState, camera) {
-        if (scanState !is ScanUiState.Analyzing || camera == null) return@LaunchedEffect
+        val analyzing = scanState as? ScanUiState.Analyzing ?: return@LaunchedEffect
+        if (camera == null) return@LaunchedEffect
         if (!capturing.compareAndSet(false, true)) return@LaunchedEffect
+        val token = analyzing.token
         try {
             imageCapture.takePicture(
                 captureExecutor,
                 object : ImageCapture.OnImageCapturedCallback() {
                     override fun onCaptureSuccess(image: ImageProxy) {
-                        try {
-                            val bitmap = image.toUprightBitmap()
-                            if (bitmap != null) {
-                                latestOnStill.value(bitmap)
-                            } else {
-                                latestOnCaptureFailed.value("Could not decode the captured photo.")
+                        image.use { proxy ->
+                            try {
+                                val bitmap = proxy.toUprightBitmap()
+                                if (bitmap != null) {
+                                    latestOnStill.value(bitmap, token)
+                                } else {
+                                    latestOnCaptureFailed.value(
+                                        "Could not decode the captured photo.",
+                                        token,
+                                    )
+                                }
+                            } catch (throwable: Throwable) {
+                                latestOnCaptureFailed.value(
+                                    throwable.message ?: "Could not decode the captured photo.",
+                                    token,
+                                )
+                            } finally {
+                                capturing.set(false)
                             }
-                        } catch (throwable: Throwable) {
-                            latestOnCaptureFailed.value(
-                                throwable.message ?: "Could not decode the captured photo.",
-                            )
-                        } finally {
-                            image.close()
-                            capturing.set(false)
                         }
                     }
 
@@ -459,6 +467,7 @@ private fun CameraStage(
                         capturing.set(false)
                         latestOnCaptureFailed.value(
                             exception.message ?: "The camera could not take the still photo.",
+                            token,
                         )
                     }
                 },
@@ -467,7 +476,16 @@ private fun CameraStage(
             capturing.set(false)
             latestOnCaptureFailed.value(
                 throwable.message ?: "The camera could not take the still photo.",
+                token,
             )
+        }
+    }
+
+    // A timeout or retry must release the capture latch so the next scan can
+    // take a picture even if the previous callback never arrived.
+    LaunchedEffect(scanState) {
+        if (scanState !is ScanUiState.Analyzing) {
+            capturing.set(false)
         }
     }
 

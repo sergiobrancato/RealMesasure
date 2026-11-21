@@ -32,6 +32,15 @@ object Formats {
             abs(error),
         )
 
+    /** `1234.5 ± 2.0 mm²` */
+    fun mm2WithError(value: Double, error: Double, digits: Int = 1): String =
+        String.format(
+            Locale.US,
+            "%.${digits}f ± %.${digits}f mm²",
+            value,
+            abs(error),
+        )
+
     /** `120.40 ± 0.42 × 80.10 ± 0.31 mm` */
     fun dimensionsWithError(
         lengthMm: Double,

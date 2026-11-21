@@ -23,10 +23,11 @@ RealMeasure turns a phone into a flatbed metrology scanner:
 2. Point the rear camera at the scene. A live detector tracks the reference quadrilateral, rejects excessive tilt and advances a stability ring.
 3. After five stable frames the app **automatically** captures a full-resolution still (`CAPTURE_MODE_MAXIMIZE_QUALITY`). No shutter button.
 4. `cornerSubPix` refines the four reference corners on the full-resolution grayscale, a planar homography flattens the entire scene at a uniform **px/mm** scale, and OpenCV traces every outer contour and internal hole.
-5. The app reports the **minimum bounding box, exact perimeter, net surface area, hole diameters and centre-to-centre spacings**, each with a physics-based **`± mm` / `± cm²`** uncertainty.
-6. Drag two precision pins anywhere on the flattened image to measure a custom point-to-point distance. Tap any object to select it.
-7. Export a **true-scale 1:1 SVG** whose `width`/`height` are in millimetres, ready for Fusion 360, Onshape, Inkscape or a laser cutter.
-8. Save scans locally in **My Scans** with an annotated thumbnail, dimensions, area, hole count, date, SVG re-export and delete.
+5. The app reports the **2D planar footprint** — net surface area, exact outline perimeter, minimum bounding box, hole diameters and centre-to-centre spacings — each with a physics-based **`± mm` / `± cm²`** uncertainty.
+6. Drag two precision pins (with a 36 dp finger offset, a 3× loupe and 0.1 mm fine-tune arrows) anywhere on the flattened image to measure a custom point-to-point distance. Tap any object to select it.
+7. For containers and tall parts, an optional **3D height parallax slider** (0–150 mm) applies `k = 1 − h / 400 mm` to the reported linear dimensions and `k²` to the area in real time.
+8. Export a **true-scale 1:1 SVG** whose `width`/`height` are in millimetres, ready for Fusion 360, Onshape, Inkscape or a laser cutter.
+9. Save scans locally in **My Scans** with an annotated thumbnail, dimensions, area, hole count, date, SVG re-export and delete.
 
 The app declares **no internet permission** and performs zero network requests. OpenCV runs entirely on-device.
 
@@ -258,6 +259,39 @@ The reported area and perimeter are computed **before** simplification; only the
 
 ---
 
+## 2D planar footprint vs 3D containers
+
+The homography recovers the plane \(z=0\), the table surface on which the reference lies. Every contour, net area, perimeter and pin distance is therefore the object's **orthogonal projection onto that plane**:
+
+- for a flat part (gasket, bracket, board, template) this is the true 2D cross-section;
+- for a 3D container or tall object it is the **projected footprint**. The top face is closer to the camera than the reference plane, so it subtends a larger angle and appears magnified.
+
+RealMeasure labels the hero metrics **“2D Planar Footprint (from photo)”** for exactly this reason.
+
+### Optional first-order height parallax correction
+
+For the standard handheld camera distance \(H_{\text{cam}} = 400\ \text{mm}\), let
+
+\[
+\boxed{k = 1-\frac{h}{H_{\text{cam}}}}
+\]
+
+where \(h\) is the object height set by the optional **3D Object Height (Parallax)** slider (`0–150 mm`, default `0`). The reported measurements become
+
+\[
+\boxed{D_{\text{true}} = D_{\text{apparent}}\cdot k}
+\qquad
+\boxed{P_{\text{true}} = P_{\text{apparent}}\cdot k}
+\qquad
+\boxed{A_{\text{true}} = A_{\text{apparent}}\cdot k^{2}}
+\]
+
+Error margins scale the same way: linear margins by \(k\), area margins by \(k^{2}\). At \(h=0\) the correction is exactly 1 and the normal 2D footprint is reported. For a distant/orthographic camera \(h/H_{\text{cam}}\to 0\), so the correction vanishes.
+
+The approximation assumes the object's top face is roughly parallel to the reference plane and the camera is approximately above the object's centre. It is a first-order parallax model, not a full 3D reconstruction. The **SVG and saved scan image remain the projected 2D footprint**; the height correction changes the reported dimensions, not the vector outline.
+
+---
+
 ## Measurement uncertainty model
 
 All uncertainty is expressed as a **1-sigma engineering margin**, not a statistical confidence interval. It combines the two dominant error sources.
@@ -420,6 +454,7 @@ Key properties:
 - All coordinates are translated so the object’s bounding box starts at `(0,0)`.
 - Contours were simplified with a **0.25 mm** tolerance; the measurement metrics are computed from the unsimplified contours.
 - Sharing uses Android `FileProvider` with MIME type `image/svg+xml`, so third-party CAD/laser apps receive a readable content URI.
+- The export is the **projected 2D footprint**. The optional 3D height parallax slider changes reported dimensions only; it does not warp the SVG outline.
 
 ---
 
@@ -451,35 +486,39 @@ RealMeasure/
 │  │  └─ AppPreferences.kt              # "Don't show again"
 │  ├─ ui/
 │  │  ├─ RealMeasureApp.kt              # bottom nav + onboarding gate
-│  │  ├─ ScannerViewModel.kt            # strict ScanUiState + preview/still pipeline
+│  │  ├─ ScannerViewModel.kt            # tokenized ScanUiState + Default-dispatcher pipeline
 │  │  ├─ ScansViewModel.kt              # My Scans save/delete/refresh
-│  │  ├─ Formats.kt                     # ± mm / ± cm² formatting
+│  │  ├─ Formats.kt                     # ± mm / ± cm² / ± mm² formatting
 │  │  ├─ components/
 │  │  │  ├─ Controls.kt                 # segmented reference selector, badges, actions
 │  │  │  ├─ ScannerOverlay.kt           # emerald tracking polygon + stability ring
+│  │  │  ├─ InteractiveCaliper.kt       # normalized two-pin caliper, loupe, 0.1 mm nudge
 │  │  │  ├─ OnboardingModal.kt          # Canvas diagram of the selected reference
 │  │  │  └─ ErrorModal.kt               # reason + Try Again
 │  │  └─ screens/
 │  │     ├─ ScannerScreen.kt            # CameraX Preview + ImageAnalysis + ImageCapture
-│  │     ├─ ResultScreen.kt             # interactive pins, spec card, save, SVG
+│  │     ├─ ResultScreen.kt             # 2D hero metrics, height parallax, save, SVG
 │  │     └─ ScansScreen.kt              # history cards, re-export, delete
 │  └─ res/xml/file_paths.xml            # FileProvider exports/ + scans/
 └─ app/src/test/java/com/realmeasure/app/
-   ├─ ErrorEstimatorTest.kt             # 9 uncertainty-model tests
+   ├─ ErrorEstimatorTest.kt             # 13 uncertainty + parallax tests
    ├─ GeometryTest.kt                   # 7 ordering/tilt/homography tests
    └─ SvgBuilderTest.kt                 # 4 true-scale SVG tests
 ```
 
-### State machine
+### State machine & freeze recovery
 
 ```text
 Scanning(referenceDetected, guidanceMessage, stabilityProgress, referenceQuad, tiltDeg)
    │  5 stable preview frames
    ▼
-Analyzing ── full-resolution still ──► Success(ScanAnalysis)
-   │                                        │
-   └── calibration / contour failure ──► Error(title, reason) ── Try Again ──► Scanning
+Analyzing(token) ── full-resolution still ──► Success(ScanAnalysis)
+   │                                              │
+   ├── calibration / contour failure ──► Error(title, reason) ── Try Again ──► Scanning
+   └── 6 s watchdog (capture or OpenCV stall) ──► Error("Scan Timed Out", ...)
 ```
+
+Every `ImageAnalysis` frame runs inside `imageProxy.use { ... }` and an `AtomicBoolean` guard, so a proxy is never leaked. Preview conversion, still decoding, `warpPerspective`, `findContours`, `moments` and all contour maths run on background dispatchers (`Dispatchers.Default` for the ViewModel pipeline), never on the main thread. Every temporary `Mat` is released through `MatPool`/`finally`. The tokenized `Analyzing` state plus a **6-second watchdog** guarantees a stale capture or a stalled native call cannot leave the UI on a spinner.
 
 The preview pipeline is paused while `Analyzing`/`Success`/`Error` and while the onboarding modal is open. Switching to **My Scans** unbinds the camera entirely.
 
@@ -520,9 +559,11 @@ and uploads the debug APK.
 4. Hold the phone parallel to the table. The live emerald polygon tracks the reference; the guidance pill warns about tilt or low light.
 5. When the ring fills after five stable frames, the app captures automatically and flattens the scene.
 6. On the result screen:
+   - the **2D Planar Footprint (from photo)** card shows area (`cm²` and `mm²`), perimeter, bounding box and hole count with `±` margins;
    - tap any detected object to select it;
-   - **drag P1/P2** for a custom point-to-point distance with `± δD`;
-   - read the bounding box, net area, perimeter, hole diameters and centre-to-centre spacings;
+   - **drag the P1/P2 grips** (36 dp below the crosshair tips) for a custom point-to-point distance with `± δD`; while dragging, a **3× loupe** shows the pixels under the active tip;
+   - use the **Fine-Tune** bar's Pin 1/Pin 2 pills and **← ↑ ↓ →** arrows for exact **0.1 mm** nudges;
+   - optionally expand **3D Object Height (Parallax)**, set the height (`0–150 mm`) and watch the linear metrics scale by `k` and areas by `k²`;
    - **Save to My Scans**, **Export 1:1 SVG**, or **Scan Another**.
 7. In **My Scans**, re-export the SVG or delete an entry (JPEG + JSON record are removed together).
 
@@ -535,13 +576,15 @@ and uploads the debug APK.
 | Tilt too high | Interior angles deviate by >22° | Hold the phone parallel to the surface |
 | Reference distorted | The quad is degenerate | Flatten the sheet/card; avoid folds |
 | No object found | No valid contour after masking the reference | Use a contrasting matte background; keep the object fully in frame |
+| Scan Timed Out | Capture or OpenCV exceeded the 6 s watchdog | Improve lighting, hold steady, retry |
 | Low precision badge | δL above the mode threshold | Move closer, add light, or switch to A4 for objects >250 mm |
 
 ---
 
 ## Limitations
 
-- The method is **planar**: the object must lie on the same flat surface as the reference. Height/thickness is not recovered from a single image.
+- The method is **planar**: the object must lie on the same flat surface as the reference. All geometry is the **projected 2D footprint**; true 3D volume and side-wall shape are not recovered from a single image.
+- For 3D containers, the optional height slider applies the first-order parallax correction \(D_{\text{true}}=D_{\text{apparent}}(1-h/H_{\text{cam}})\). It assumes a 400 mm camera distance, a roughly parallel top face and a camera above the object centre; it is not a full 3D reconstruction. The SVG and saved image remain the projected footprint.
 - A single homography cannot model strong **lens distortion** (wide-angle phone lenses). The uncertainty model absorbs the residual into ε_cal, but a physically flatter lens (or a future calibration grid) improves accuracy.
 - Holes are reduced to an **equivalent-area diameter**. Slots and keyholes are correct in area, but their diameter is not a width measurement; use the two-pin caliper or the SVG for their exact profile.
 - Objects touching the flattened canvas border are rejected because their contour is incomplete.

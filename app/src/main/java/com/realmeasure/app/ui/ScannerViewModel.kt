@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.cv.CalibrationException
 import com.realmeasure.app.cv.Geometry
@@ -13,16 +14,24 @@ import com.realmeasure.app.cv.ReferenceDetector
 import com.realmeasure.app.cv.ScanAnalysis
 import com.realmeasure.app.model.Pt
 import com.realmeasure.app.model.ReferenceMode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.util.concurrent.Executors
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
 // ---------------------------------------------------------------------------
-// Guidance copy (exact strings required by the workflow)
+// Guidance copy
 // ---------------------------------------------------------------------------
 
 private const val GUIDANCE_CARD = "Place ID card flat beside your object"
@@ -31,13 +40,19 @@ private const val GUIDANCE_TILT = "Hold phone flatter to reduce tilt"
 private const val GUIDANCE_LOCKED = "Reference locked! Hold steady..."
 private const val GUIDANCE_DARK = "Scene is dark — tap the flashlight for accuracy"
 
+/** Hard limit for capture + full-resolution analysis. */
+private const val SCAN_TIMEOUT_MS = 6_000L
+
+private const val TIMEOUT_TITLE = "Scan Timed Out"
+private const val TIMEOUT_REASON =
+    "Could not process frame. Ensure good lighting and hold steady."
+
 /**
  * Strict scanner state machine.
  *
  * Exactly one of these values is live at a time. Frames are consumed only in
- * [Scanning]; [Analyzing] runs the full-resolution still through calibration
- * and contour analysis, and [Success] / [Error] keep the pipeline paused until
- * the user dismisses the result.
+ * [Scanning]; [Analyzing] carries a token identifying the capture/analysis
+ * generation, and [Success] / [Error] keep the pipeline paused until dismissed.
  */
 sealed interface ScanUiState {
 
@@ -45,12 +60,12 @@ sealed interface ScanUiState {
         val referenceDetected: Boolean,
         val guidanceMessage: String,
         val stabilityProgress: Float,
-        /** Detected reference polygon normalised to the viewfinder stage. */
         val referenceQuad: List<Pt>?,
         val tiltDeg: Double,
     ) : ScanUiState
 
-    data object Analyzing : ScanUiState
+    /** [token] prevents a stale capture from completing a newer scan. */
+    data class Analyzing(val token: Long) : ScanUiState
 
     data class Success(val analysis: ScanAnalysis) : ScanUiState
 
@@ -69,11 +84,10 @@ data class ScannerUi(
 /**
  * Hands-free planar scanner.
  *
- * Live preview frames (~7 fps) only run the cheap reference detector. Once the
- * selected ID card / A4 sheet is stable for five consecutive frames, the ViewModel
- * emits a capture request; the screen grabs a full-resolution still with
- * CameraX ImageCapture at MAXIMIZE_QUALITY and hands it back for the precise
- * cornerSubPix + homography + contour pipeline.
+ * All preview and still processing runs on [Dispatchers.Default]; nothing
+ * touches the main thread except StateFlow publication and the UI's camera
+ * callbacks. A tokenized Analyzing state plus a 6 s watchdog guarantees the UI
+ * can never remain stuck on a loading state after a capture or OpenCV stall.
  */
 class ScannerViewModel : ViewModel() {
 
@@ -82,14 +96,11 @@ class ScannerViewModel : ViewModel() {
     )
     val ui: StateFlow<ScannerUi> = _ui.asStateFlow()
 
-    private val analysisExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "realmeasure-planar-analysis").apply {
-            priority = Thread.NORM_PRIORITY - 1
-        }
-    }
-
-    private val frameInFlight = AtomicBoolean(false)
+    private val isFrameBusy = AtomicBoolean(false)
     private val stillInFlight = AtomicBoolean(false)
+    private val nextToken = AtomicLong(0L)
+
+    private var watchdogJob: Job? = null
     private var lastFrameAt = 0L
     private var consecutiveValid = 0
 
@@ -107,6 +118,8 @@ class ScannerViewModel : ViewModel() {
 
     fun setMode(newMode: ReferenceMode) {
         if (newMode == _ui.value.mode) return
+        cancelWatchdog()
+        stillInFlight.set(false)
         consecutiveValid = 0
         _ui.update {
             it.copy(
@@ -120,6 +133,8 @@ class ScannerViewModel : ViewModel() {
 
     /** Called by "Scan Another" / "Try Again". */
     fun resumeScanning() {
+        cancelWatchdog()
+        stillInFlight.set(false)
         consecutiveValid = 0
         _ui.update {
             it.copy(scan = searchingState(it.mode))
@@ -128,7 +143,7 @@ class ScannerViewModel : ViewModel() {
 
     /**
      * Consume one upright, 3:4 stage-cropped preview frame. Takes ownership of
-     * [frame] and recycles it after the cheap reference inspection.
+     * [frame] and recycles it after the reference inspection.
      */
     fun onPreviewFrame(frame: Bitmap) {
         val state = _ui.value.scan
@@ -141,30 +156,46 @@ class ScannerViewModel : ViewModel() {
             frame.recycle()
             return
         }
-        if (!frameInFlight.compareAndSet(false, true)) {
+        if (!isFrameBusy.compareAndSet(false, true)) {
             frame.recycle()
             return
         }
         lastFrameAt = now
 
-        try {
-            analysisExecutor.execute {
-                try {
-                    inspectPreview(frame, _ui.value.mode)
-                } finally {
-                    frameInFlight.set(false)
-                    if (!frame.isRecycled) frame.recycle()
+        if (!viewModelScope.isActive) {
+            isFrameBusy.set(false)
+            frame.recycle()
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                inspectPreview(frame, _ui.value.mode)
+            } catch (throwable: Throwable) {
+                cancelWatchdog()
+                _ui.update {
+                    it.copy(
+                        scan = ScanUiState.Error(
+                            title = "Live detection failed",
+                            reason = throwable.message
+                                ?: "Unexpected error while scanning the frame.",
+                        ),
+                    )
                 }
+            } finally {
+                isFrameBusy.set(false)
+                if (!frame.isRecycled) frame.recycle()
             }
-        } catch (exception: RuntimeException) {
-            frameInFlight.set(false)
-            if (!frame.isRecycled) frame.recycle()
         }
     }
 
-    /** Called by the screen with a full-resolution still from ImageCapture. */
-    fun onStillCaptured(still: Bitmap) {
-        if (_ui.value.scan !is ScanUiState.Analyzing) {
+    /**
+     * Called by the screen with a full-resolution still. [token] must match the
+     * current Analyzing state, otherwise the still is stale and discarded.
+     */
+    fun onStillCaptured(still: Bitmap, token: Long) {
+        val state = _ui.value.scan
+        if (state !is ScanUiState.Analyzing || state.token != token) {
             still.recycle()
             return
         }
@@ -172,31 +203,70 @@ class ScannerViewModel : ViewModel() {
             still.recycle()
             return
         }
-        try {
-            analysisExecutor.execute {
-                try {
-                    processStill(still, _ui.value.mode)
-                } finally {
-                    stillInFlight.set(false)
-                    if (!still.isRecycled) still.recycle()
-                }
-            }
-        } catch (exception: RuntimeException) {
+        if (!viewModelScope.isActive) {
             stillInFlight.set(false)
             still.recycle()
-            _ui.update {
-                it.copy(
-                    scan = ScanUiState.Error(
-                        title = "Analyzer unavailable",
-                        reason = "The analysis thread was stopped. Reopen the scanner and try again.",
-                    ),
+            return
+        }
+        val mode = _ui.value.mode
+
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                withTimeout(SCAN_TIMEOUT_MS) {
+                    val calibration = PrecisionCalibrator.calibrate(still, mode)
+                    val objects = IrregularShapeAnalyzer.analyze(
+                        warped = calibration.warpedBitmap,
+                        calibration = calibration,
+                    )
+                    if (isCurrentAnalyzing(token)) {
+                        _ui.update {
+                            it.copy(
+                                scan = ScanUiState.Success(
+                                    analysis = ScanAnalysis(
+                                        mode = mode,
+                                        calibration = calibration,
+                                        objects = objects,
+                                        selectedIndex = 0,
+                                    ),
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (exception: TimeoutCancellationException) {
+                setErrorIfCurrent(token, TIMEOUT_TITLE, TIMEOUT_REASON)
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: CalibrationException) {
+                setErrorIfCurrent(
+                    token,
+                    calibrationTitle(exception.code),
+                    exception.message ?: "Could not calibrate the reference.",
                 )
+            } catch (exception: IrregularShapeAnalyzer.AnalysisException) {
+                setErrorIfCurrent(
+                    token,
+                    "No object found",
+                    exception.message ?: "Could not isolate an object.",
+                )
+            } catch (throwable: Throwable) {
+                setErrorIfCurrent(
+                    token,
+                    "Scan failed",
+                    throwable.message ?: "Unexpected error during measurement.",
+                )
+            } finally {
+                stillInFlight.set(false)
+                cancelWatchdog()
+                if (!still.isRecycled) still.recycle()
             }
         }
     }
 
-    fun onCaptureFailed(reason: String) {
-        if (_ui.value.scan !is ScanUiState.Analyzing) return
+    fun onCaptureFailed(reason: String, token: Long) {
+        if (!isCurrentAnalyzing(token)) return
+        cancelWatchdog()
+        stillInFlight.set(false)
         _ui.update {
             it.copy(
                 scan = ScanUiState.Error(
@@ -208,7 +278,7 @@ class ScannerViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-        analysisExecutor.shutdownNow()
+        cancelWatchdog()
         super.onCleared()
     }
 
@@ -219,145 +289,114 @@ class ScannerViewModel : ViewModel() {
     private fun inspectPreview(frame: Bitmap, mode: ReferenceMode) {
         if (externallyPaused || _ui.value.scan !is ScanUiState.Scanning) return
 
-        try {
-            val detection = ReferenceDetector.detect(
-                bitmap = frame,
-                mode = mode,
-                maxWidth = AppConfig.Detection.WORKING_WIDTH_PX,
-            )
-            val brightness = meanBrightness(frame)
-            val lowLight = brightness < AppConfig.Detection.LOW_LIGHT_MEAN
+        val detection = ReferenceDetector.detect(
+            bitmap = frame,
+            mode = mode,
+            maxWidth = AppConfig.Detection.WORKING_WIDTH_PX,
+        )
+        val brightness = meanBrightness(frame)
+        val lowLight = brightness < AppConfig.Detection.LOW_LIGHT_MEAN
 
-            if (detection == null) {
+        if (detection == null) {
+            consecutiveValid = 0
+            _ui.update {
+                it.copy(
+                    scan = ScanUiState.Scanning(
+                        referenceDetected = false,
+                        guidanceMessage = if (lowLight) GUIDANCE_DARK else searchMessage(mode),
+                        stabilityProgress = 0f,
+                        referenceQuad = null,
+                        tiltDeg = 0.0,
+                    ),
+                )
+            }
+            return
+        }
+
+        val ordered = Geometry.orderQuad(detection.quad)
+        val tilt = Geometry.maxTiltDeviationDeg(ordered)
+        val normalized = ordered.map {
+            Pt(it.x / frame.width, it.y / frame.height)
+        }
+
+        when {
+            tilt > AppConfig.Detection.MAX_LIVE_TILT_DEG -> {
                 consecutiveValid = 0
                 _ui.update {
                     it.copy(
                         scan = ScanUiState.Scanning(
-                            referenceDetected = false,
-                            guidanceMessage = if (lowLight) GUIDANCE_DARK else searchMessage(mode),
+                            referenceDetected = true,
+                            guidanceMessage = GUIDANCE_TILT,
                             stabilityProgress = 0f,
-                            referenceQuad = null,
-                            tiltDeg = 0.0,
+                            referenceQuad = normalized,
+                            tiltDeg = tilt,
                         ),
                     )
                 }
-                return
             }
 
-            val ordered = Geometry.orderQuad(detection.quad)
-            val tilt = Geometry.maxTiltDeviationDeg(ordered)
-            val normalized = ordered.map {
-                Pt(it.x / frame.width, it.y / frame.height)
-            }
+            else -> {
+                consecutiveValid++
+                val progress = (
+                    consecutiveValid.toFloat() /
+                        AppConfig.Detection.REQUIRED_CONSECUTIVE_FRAMES
+                    ).coerceIn(0f, 1f)
 
-            when {
-                tilt > AppConfig.Detection.MAX_LIVE_TILT_DEG -> {
+                if (progress >= 1f) {
                     consecutiveValid = 0
+                    val token = nextToken.incrementAndGet()
+                    _ui.update {
+                        it.copy(scan = ScanUiState.Analyzing(token))
+                    }
+                    armWatchdog(token)
+                } else {
                     _ui.update {
                         it.copy(
                             scan = ScanUiState.Scanning(
                                 referenceDetected = true,
-                                guidanceMessage = GUIDANCE_TILT,
-                                stabilityProgress = 0f,
+                                guidanceMessage = GUIDANCE_LOCKED,
+                                stabilityProgress = progress,
                                 referenceQuad = normalized,
                                 tiltDeg = tilt,
                             ),
                         )
                     }
                 }
-                else -> {
-                    consecutiveValid++
-                    val progress = (
-                        consecutiveValid.toFloat() /
-                            AppConfig.Detection.REQUIRED_CONSECUTIVE_FRAMES
-                        ).coerceIn(0f, 1f)
-
-                    if (progress >= 1f) {
-                        consecutiveValid = 0
-                        _ui.update {
-                            it.copy(
-                                scan = ScanUiState.Analyzing,
-                            )
-                        }
-                    } else {
-                        _ui.update {
-                            it.copy(
-                                scan = ScanUiState.Scanning(
-                                    referenceDetected = true,
-                                    guidanceMessage = GUIDANCE_LOCKED,
-                                    stabilityProgress = progress,
-                                    referenceQuad = normalized,
-                                    tiltDeg = tilt,
-                                ),
-                            )
-                        }
-                    }
-                }
-            }
-        } catch (throwable: Throwable) {
-            _ui.update {
-                it.copy(
-                    scan = ScanUiState.Error(
-                        title = "Live detection failed",
-                        reason = throwable.message ?: "Unexpected error while scanning the frame.",
-                    ),
-                )
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // Full-resolution still pipeline
+    // Watchdog / recovery
     // ------------------------------------------------------------------
 
-    private fun processStill(still: Bitmap, mode: ReferenceMode) {
-        if (_ui.value.scan !is ScanUiState.Analyzing) return
-        try {
-            val calibration = PrecisionCalibrator.calibrate(still, mode)
-            val objects = IrregularShapeAnalyzer.analyze(
-                warped = calibration.warpedBitmap,
-                calibration = calibration,
-            )
-            _ui.update {
-                it.copy(
-                    scan = ScanUiState.Success(
-                        analysis = ScanAnalysis(
-                            mode = mode,
-                            calibration = calibration,
-                            objects = objects,
-                            selectedIndex = 0,
-                        ),
-                    ),
-                )
-            }
-        } catch (exception: CalibrationException) {
-            _ui.update {
-                it.copy(
-                    scan = ScanUiState.Error(
-                        title = calibrationTitle(exception.code),
-                        reason = exception.message ?: "Could not calibrate the reference.",
-                    ),
-                )
-            }
-        } catch (exception: IrregularShapeAnalyzer.AnalysisException) {
-            _ui.update {
-                it.copy(
-                    scan = ScanUiState.Error(
-                        title = "No object found",
-                        reason = exception.message ?: "Could not isolate an object.",
-                    ),
-                )
-            }
-        } catch (throwable: Throwable) {
-            _ui.update {
-                it.copy(
-                    scan = ScanUiState.Error(
-                        title = "Scan failed",
-                        reason = throwable.message ?: "Unexpected error during measurement.",
-                    ),
-                )
+    private fun armWatchdog(token: Long) {
+        cancelWatchdog()
+        watchdogJob = viewModelScope.launch {
+            delay(SCAN_TIMEOUT_MS)
+            if (isCurrentAnalyzing(token)) {
+                stillInFlight.set(false)
+                setErrorIfCurrent(token, TIMEOUT_TITLE, TIMEOUT_REASON)
             }
         }
+    }
+
+    private fun cancelWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+    }
+
+    private fun isCurrentAnalyzing(token: Long): Boolean {
+        val state = _ui.value.scan
+        return state is ScanUiState.Analyzing && state.token == token
+    }
+
+    private fun setErrorIfCurrent(token: Long, title: String, reason: String) {
+        if (!isCurrentAnalyzing(token)) return
+        _ui.update {
+            it.copy(scan = ScanUiState.Error(title = title, reason = reason))
+        }
+        cancelWatchdog()
     }
 
     // ------------------------------------------------------------------
@@ -387,7 +426,7 @@ class ScannerViewModel : ViewModel() {
         else -> "Scan failed"
     }
 
-    /** Coarse luma sample; avoids a full-frame OpenCV pass on the UI thread. */
+    /** Coarse luma sample; runs on Dispatchers.Default with the rest of the CV work. */
     private fun meanBrightness(bitmap: Bitmap): Double {
         val stepX = max(1, bitmap.width / 48)
         val stepY = max(1, bitmap.height / 64)
@@ -398,7 +437,9 @@ class ScannerViewModel : ViewModel() {
             var x = 0
             while (x < bitmap.width) {
                 val pixel = bitmap.getPixel(x, y)
-                sum += 0.299 * Color.red(pixel) + 0.587 * Color.green(pixel) + 0.114 * Color.blue(pixel)
+                sum += 0.299 * Color.red(pixel) +
+                    0.587 * Color.green(pixel) +
+                    0.114 * Color.blue(pixel)
                 count++
                 x += stepX
             }

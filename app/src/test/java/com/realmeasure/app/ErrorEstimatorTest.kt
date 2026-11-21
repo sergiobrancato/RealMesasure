@@ -1,5 +1,6 @@
 package com.realmeasure.app
 
+import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.cv.ErrorEstimator
 import com.realmeasure.app.model.MeasurementQuality
 import com.realmeasure.app.model.ReferenceMode
@@ -102,5 +103,47 @@ class ErrorEstimatorTest {
             epsilonCal = 0.002,
         )
         assertTrue(a4Error < cardError * 0.40)
+    }
+
+    // ------------------------------------------------------------------
+    // 3D height parallax correction
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `zero height leaves measurements unchanged`() {
+        assertEquals(1.0, ErrorEstimator.parallaxFactor(0.0), 1e-12)
+        assertEquals(100.0, ErrorEstimator.correctLength(100.0, 0.0), 1e-12)
+        assertEquals(2500.0, ErrorEstimator.correctArea(2500.0, 0.0), 1e-12)
+    }
+
+    @Test
+    fun `forty millimetres height at four hundred millimetres produces k of zero point nine`() {
+        val k = ErrorEstimator.parallaxFactor(40.0)
+        assertEquals(0.9, k, 1e-12)
+        assertEquals(90.0, ErrorEstimator.correctLength(100.0, 40.0), 1e-9)
+        assertEquals(2025.0, ErrorEstimator.correctArea(2500.0, 40.0), 1e-9)
+    }
+
+    @Test
+    fun `parallax correction scales error margins by k and k squared`() {
+        assertEquals(
+            0.9,
+            ErrorEstimator.correctLinearError(1.0, 40.0),
+            1e-12,
+        )
+        assertEquals(
+            0.81,
+            ErrorEstimator.correctAreaError(1.0, 40.0),
+            1e-12,
+        )
+    }
+
+    @Test
+    fun `maximum supported height stays physically meaningful`() {
+        val k = ErrorEstimator.parallaxFactor(
+            AppConfig.ErrorModel.MAX_PARALLAX_HEIGHT_MM,
+        )
+        assertEquals(0.625, k, 1e-12)
+        assertTrue(k > 0.0)
     }
 }

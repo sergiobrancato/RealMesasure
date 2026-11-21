@@ -1,12 +1,7 @@
 package com.realmeasure.app.ui.screens
 
-import android.graphics.Bitmap
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.drag
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,52 +19,38 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextMeasurer
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.config.WorkshopPalette
 import com.realmeasure.app.cv.AnalysisRenderer
+import com.realmeasure.app.cv.CalibrationResult
 import com.realmeasure.app.cv.ErrorEstimator
-import com.realmeasure.app.cv.Geometry
 import com.realmeasure.app.cv.ScanAnalysis
 import com.realmeasure.app.export.SvgExporter
 import com.realmeasure.app.model.HoleGeometry
@@ -78,6 +59,7 @@ import com.realmeasure.app.model.Pt
 import com.realmeasure.app.ui.Formats
 import com.realmeasure.app.ui.ScansViewModel
 import com.realmeasure.app.ui.components.InfoChip
+import com.realmeasure.app.ui.components.InteractiveCaliper
 import com.realmeasure.app.ui.components.MetricRow
 import com.realmeasure.app.ui.components.PrimaryAction
 import com.realmeasure.app.ui.components.QualityBadge
@@ -87,17 +69,18 @@ import com.realmeasure.app.ui.theme.Mono
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.max
-import kotlin.math.min
+import java.util.Locale
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
  * Interactive flattened result.
  *
- * The warped canvas is displayed at a fit scale. Cyan contours and amber hole
- * callouts are drawn directly in Compose so the object selection, the two
- * draggable measurement pins and the live distance readout update without
- * re-running computer vision.
+ * The top of the readout reports the **2D planar footprint** (area, perimeter,
+ * bounding box) with its propagated margins. An optional 3D height slider
+ * applies the first-order parallax correction k = 1 - h / H_cam to the
+ * displayed linear metrics (×k) and areas (×k²). The image and exported SVG
+ * remain the projected 2D footprint.
  */
 @Composable
 fun ResultScreen(
@@ -110,27 +93,57 @@ fun ResultScreen(
     val calibration = analysis.calibration
     val mode = analysis.mode
     val pixelsPerMm = calibration.pixelsPerMm
+    val bitmap = calibration.warpedBitmap
+    val canvasWidthMm = bitmap.width / pixelsPerMm
+    val canvasHeightMm = bitmap.height / pixelsPerMm
     val saving by scansViewModel.saving.collectAsStateWithLifecycle()
 
     var selectedIndex by remember(analysis) {
         mutableStateOf(analysis.selectedIndex.coerceIn(0, analysis.objects.lastIndex))
     }
     val selectedObject = analysis.objects[selectedIndex]
+    val initial = initialPins(selectedObject, canvasWidthMm, canvasHeightMm)
 
-    var pins by remember(analysis) { mutableStateOf(initialPins(selectedObject)) }
+    var pin1 by remember(analysis) { mutableStateOf(initial.first) }
+    var pin2 by remember(analysis) { mutableStateOf(initial.second) }
+    var objectHeightMm by remember(analysis) { mutableFloatStateOf(0f) }
+    var heightExpanded by remember { mutableStateOf(false) }
     var saved by remember(analysis) { mutableStateOf(false) }
 
     LaunchedEffect(selectedIndex) {
-        pins = initialPins(analysis.objects[selectedIndex])
+        val pins = initialPins(
+            analysis.objects[selectedIndex],
+            canvasWidthMm,
+            canvasHeightMm,
+        )
+        pin1 = pins.first
+        pin2 = pins.second
+        objectHeightMm = 0f
         saved = false
     }
 
-    val pinDistance = Geometry.distance(pins[0], pins[1])
-    val pinError = ErrorEstimator.distanceError(
-        pinDistance,
+    val parallaxFactor = ErrorEstimator.parallaxFactor(objectHeightMm.toDouble())
+    val apparentPinDistance = hypot(
+        (pin2.x - pin1.x) * canvasWidthMm,
+        (pin2.y - pin1.y) * canvasHeightMm,
+    )
+    val apparentPinError = ErrorEstimator.distanceError(
+        apparentPinDistance,
         calibration.nativePixelsPerMm,
         mode.widthMm,
         calibration.epsilonCal,
+    )
+    val pinDistance = apparentPinDistance * parallaxFactor
+    val pinError = apparentPinError * parallaxFactor
+
+    val correctedQuality = ErrorEstimator.quality(
+        selectedObject.lengthErrorMm * parallaxFactor,
+        mode,
+    )
+    val correctedRecommendation = ErrorEstimator.recommendation(
+        correctedQuality,
+        mode,
+        selectedObject.lengthMm * parallaxFactor,
     )
 
     Dialog(
@@ -164,14 +177,17 @@ fun ResultScreen(
                         .padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    FlattenedCanvas(
+                    InteractiveCaliper(
                         analysis = analysis,
                         selectedIndex = selectedIndex,
-                        pins = pins,
-                        onPinsChange = { pins = it },
+                        pin1 = pin1,
+                        pin2 = pin2,
+                        onPin1Change = { pin1 = it },
+                        onPin2Change = { pin2 = it },
                         onSelectObject = { selectedIndex = it },
-                        pinDistance = pinDistance,
-                        pinError = pinError,
+                        pinDistanceMm = pinDistance,
+                        pinErrorMm = pinError,
+                        parallaxFactor = parallaxFactor,
                     )
 
                     if (analysis.objects.size > 1) {
@@ -183,13 +199,28 @@ fun ResultScreen(
                     }
 
                     QualityBadge(
-                        quality = selectedObject.quality,
-                        recommendation = selectedObject.qualityRecommendation,
+                        quality = correctedQuality,
+                        recommendation = correctedRecommendation,
+                    )
+
+                    PlanarHeroCard(
+                        objectGeometry = selectedObject,
+                        parallaxFactor = parallaxFactor,
+                        objectHeightMm = objectHeightMm.toDouble(),
+                    )
+
+                    HeightParallaxCard(
+                        heightMm = objectHeightMm,
+                        onHeightChange = { objectHeightMm = it },
+                        expanded = heightExpanded,
+                        onToggle = { heightExpanded = !heightExpanded },
+                        parallaxFactor = parallaxFactor,
                     )
 
                     SpecCard(
                         objectGeometry = selectedObject,
                         calibration = calibration,
+                        parallaxFactor = parallaxFactor,
                     )
 
                     Row(
@@ -207,7 +238,7 @@ fun ResultScreen(
                                 scope.launch {
                                     val annotated = withContext(Dispatchers.Default) {
                                         AnalysisRenderer.renderAnnotated(
-                                            warped = calibration.warpedBitmap,
+                                            warped = bitmap,
                                             objects = analysis.objects,
                                             selectedIndex = selectedIndex,
                                             pixelsPerMm = pixelsPerMm,
@@ -253,7 +284,7 @@ fun ResultScreen(
 }
 
 // ---------------------------------------------------------------------------
-// Header + selector + spec card
+// Header, object selector, hero and height cards
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -312,7 +343,7 @@ private fun ObjectSelector(
                 } else {
                     WorkshopPalette.Sunken
                 },
-                border = androidx.compose.foundation.BorderStroke(
+                border = BorderStroke(
                     1.dp,
                     if (selected) WorkshopPalette.Cyan else WorkshopPalette.Border,
                 ),
@@ -330,66 +361,309 @@ private fun ObjectSelector(
 }
 
 @Composable
-private fun SpecCard(
+private fun PlanarHeroCard(
     objectGeometry: ObjectGeometry,
-    calibration: com.realmeasure.app.cv.CalibrationResult,
+    parallaxFactor: Double,
+    objectHeightMm: Double,
 ) {
+    val areaCm2 = objectGeometry.areaNetCm2 * parallaxFactor * parallaxFactor
+    val areaErrorCm2 = objectGeometry.areaErrorCm2 * parallaxFactor * parallaxFactor
+    val areaMm2 = objectGeometry.areaNetMm2 * parallaxFactor * parallaxFactor
+    val areaErrorMm2 = objectGeometry.areaErrorCm2 * 100.0 * parallaxFactor * parallaxFactor
+    val perimeterMm = objectGeometry.perimeterMm * parallaxFactor
+    val perimeterErrorMm = objectGeometry.perimeterErrorMm * parallaxFactor
+    val lengthMm = objectGeometry.lengthMm * parallaxFactor
+    val lengthErrorMm = objectGeometry.lengthErrorMm * parallaxFactor
+    val widthMm = objectGeometry.widthMm * parallaxFactor
+    val widthErrorMm = objectGeometry.widthErrorMm * parallaxFactor
+
     Surface(
         shape = RoundedCornerShape(18.dp),
         color = WorkshopPalette.Surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, WorkshopPalette.Border),
+        border = BorderStroke(1.dp, WorkshopPalette.Cyan.copy(alpha = 0.36f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SectionLabel("MEASUREMENTS", WorkshopPalette.TextMuted)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f)) {
+                    SectionLabel("2D PLANAR FOOTPRINT (FROM PHOTO)", WorkshopPalette.Emerald)
+                }
+                InfoChip("2D", WorkshopPalette.Emerald)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = "2D PLANAR AREA",
+                        color = WorkshopPalette.TextFaint,
+                        fontFamily = Mono,
+                        fontSize = 8.sp,
+                        letterSpacing = 0.9.sp,
+                    )
+                    Text(
+                        text = Formats.cm2WithError(areaCm2, areaErrorCm2),
+                        color = WorkshopPalette.Emerald,
+                        fontFamily = Mono,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 26.sp,
+                        lineHeight = 30.sp,
+                    )
+                    Text(
+                        text = Formats.mm2WithError(areaMm2, areaErrorMm2),
+                        color = WorkshopPalette.TextMuted,
+                        fontFamily = Mono,
+                        fontSize = 9.sp,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "2D OUTLINE PERIMETER",
+                        color = WorkshopPalette.TextFaint,
+                        fontFamily = Mono,
+                        fontSize = 8.sp,
+                        letterSpacing = 0.9.sp,
+                    )
+                    Text(
+                        text = Formats.mmWithError(perimeterMm, perimeterErrorMm),
+                        color = WorkshopPalette.Cyan,
+                        fontFamily = Mono,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 21.sp,
+                        lineHeight = 25.sp,
+                    )
+                    Text(
+                        text = "2D outline",
+                        color = WorkshopPalette.TextMuted,
+                        fontFamily = Mono,
+                        fontSize = 9.sp,
+                    )
+                }
+            }
+
+            HorizontalDivider(color = WorkshopPalette.Border)
+
             MetricRow(
                 label = "Bounding box",
                 value = Formats.dimensionsWithError(
-                    objectGeometry.lengthMm,
-                    objectGeometry.lengthErrorMm,
-                    objectGeometry.widthMm,
-                    objectGeometry.widthErrorMm,
+                    lengthMm,
+                    lengthErrorMm,
+                    widthMm,
+                    widthErrorMm,
                 ),
                 accent = WorkshopPalette.Cyan,
             )
             MetricRow(
-                label = "Net surface area",
-                value = Formats.cm2WithError(
-                    objectGeometry.areaNetCm2,
-                    objectGeometry.areaErrorCm2,
-                ),
-                accent = WorkshopPalette.Emerald,
-            )
-            MetricRow(
-                label = "Perimeter",
-                value = Formats.mmWithError(
-                    objectGeometry.perimeterMm,
-                    objectGeometry.perimeterErrorMm,
-                ),
-            )
-            MetricRow(
-                label = "Holes",
+                label = "Internal holes",
                 value = Formats.count(objectGeometry.holes.size, "hole", "holes"),
             )
 
+            Text(
+                text = "Measures the flat 2D cross-section on the reference surface. " +
+                    "For 3D containers, this represents the projected footprint area and perimeter.",
+                color = WorkshopPalette.TextMuted,
+                fontSize = 10.sp,
+                lineHeight = 15.sp,
+            )
+
+            if (objectHeightMm > 0.0) {
+                Text(
+                    text = "3D parallax correction: h = %.0f mm · k = %.3f · linear ×k, area ×k²".format(
+                        Locale.US,
+                        objectHeightMm,
+                        parallaxFactor,
+                    ),
+                    color = WorkshopPalette.Amber,
+                    fontFamily = Mono,
+                    fontSize = 9.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeightParallaxCard(
+    heightMm: Float,
+    onHeightChange: (Float) -> Unit,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    parallaxFactor: Double,
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = WorkshopPalette.Surface,
+        border = BorderStroke(1.dp, WorkshopPalette.Border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    SectionLabel("3D OBJECT HEIGHT (PARALLAX)", WorkshopPalette.Amber)
+                    Text(
+                        text = if (heightMm > 0f) {
+                            "Parallax compensation active"
+                        } else {
+                            "Optional · containers and tall parts"
+                        },
+                        color = WorkshopPalette.TextMuted,
+                        fontSize = 10.sp,
+                    )
+                }
+                Text(
+                    text = "%.0f mm".format(Locale.US, heightMm),
+                    color = WorkshopPalette.Amber,
+                    fontFamily = Mono,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                )
+                Icon(
+                    imageVector = if (expanded) {
+                        Icons.Filled.KeyboardArrowUp
+                    } else {
+                        Icons.Filled.KeyboardArrowDown
+                    },
+                    contentDescription = if (expanded) "Collapse height" else "Expand height",
+                    tint = WorkshopPalette.TextMuted,
+                    modifier = Modifier.padding(start = 6.dp),
+                )
+            }
+
+            if (expanded) {
+                Column(
+                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Slider(
+                        value = heightMm,
+                        onValueChange = onHeightChange,
+                        valueRange = 0f..AppConfig.ErrorModel.MAX_PARALLAX_HEIGHT_MM.toFloat(),
+                        steps = 149,
+                        colors = SliderDefaults.colors(
+                            thumbColor = WorkshopPalette.Amber,
+                            activeTrackColor = WorkshopPalette.Amber,
+                            inactiveTrackColor = WorkshopPalette.Border,
+                        ),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = "0 mm",
+                            color = WorkshopPalette.TextFaint,
+                            fontFamily = Mono,
+                            fontSize = 8.sp,
+                        )
+                        Text(
+                            text = "H_cam = 400 mm",
+                            color = WorkshopPalette.TextFaint,
+                            fontFamily = Mono,
+                            fontSize = 8.sp,
+                        )
+                        Text(
+                            text = "${AppConfig.ErrorModel.MAX_PARALLAX_HEIGHT_MM.toInt()} mm",
+                            color = WorkshopPalette.TextFaint,
+                            fontFamily = Mono,
+                            fontSize = 8.sp,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "linear ×%.3f · area ×%.3f".format(
+                                Locale.US,
+                                parallaxFactor,
+                                parallaxFactor * parallaxFactor,
+                            ),
+                            color = WorkshopPalette.Amber,
+                            fontFamily = Mono,
+                            fontSize = 9.sp,
+                        )
+                        TextButton(onClick = { onHeightChange(0f) }) {
+                            Text(
+                                text = "RESET",
+                                color = WorkshopPalette.Cyan,
+                                fontFamily = Mono,
+                                fontSize = 9.sp,
+                            )
+                        }
+                    }
+                    Text(
+                        text = "D_true = D_apparent × (1 − h / H_cam). Saved scans and the SVG " +
+                            "keep the projected 2D footprint; the height correction changes the " +
+                            "reported dimensions, not the vector outline.",
+                        color = WorkshopPalette.TextMuted,
+                        fontSize = 10.sp,
+                        lineHeight = 15.sp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hole / spacing / calibration detail
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun SpecCard(
+    objectGeometry: ObjectGeometry,
+    calibration: CalibrationResult,
+    parallaxFactor: Double,
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = WorkshopPalette.Surface,
+        border = BorderStroke(1.dp, WorkshopPalette.Border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SectionLabel("GEOMETRY DETAIL", WorkshopPalette.TextMuted)
+
             if (objectGeometry.holes.isNotEmpty()) {
-                HorizontalDivider(color = WorkshopPalette.Border)
                 SectionLabel("HOLE CENTRES · Ø", WorkshopPalette.Amber)
                 objectGeometry.holes.forEach { hole ->
-                    HoleRow(hole)
+                    HoleRow(hole, parallaxFactor)
                 }
             }
 
             if (objectGeometry.holeSpacings.isNotEmpty()) {
-                HorizontalDivider(color = WorkshopPalette.Border)
+                if (objectGeometry.holes.isNotEmpty()) {
+                    HorizontalDivider(color = WorkshopPalette.Border)
+                }
                 SectionLabel("CENTER-TO-CENTER", WorkshopPalette.Amber)
                 objectGeometry.holeSpacings.forEach { spacing ->
                     MetricRow(
                         label = "H${spacing.firstIndex + 1} ↔ H${spacing.secondIndex + 1}",
-                        value = Formats.mmWithError(spacing.distanceMm, spacing.errorMm),
+                        value = Formats.mmWithError(
+                            spacing.distanceMm * parallaxFactor,
+                            spacing.errorMm * parallaxFactor,
+                        ),
                     )
                 }
             }
@@ -416,415 +690,50 @@ private fun SpecCard(
 }
 
 @Composable
-private fun HoleRow(hole: HoleGeometry) {
+private fun HoleRow(hole: HoleGeometry, parallaxFactor: Double) {
     MetricRow(
         label = "H${hole.index + 1} at (%.1f, %.1f) mm".format(
             hole.centroid.x,
             hole.centroid.y,
         ),
-        value = "Ø " + Formats.mmWithError(hole.diameterMm, hole.diameterErrorMm),
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Flattened interactive canvas
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun FlattenedCanvas(
-    analysis: ScanAnalysis,
-    selectedIndex: Int,
-    pins: List<Pt>,
-    onPinsChange: (List<Pt>) -> Unit,
-    onSelectObject: (Int) -> Unit,
-    pinDistance: Double,
-    pinError: Double,
-) {
-    val calibration = analysis.calibration
-    val bitmap = calibration.warpedBitmap
-    val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
-    val pixelsPerMm = calibration.pixelsPerMm
-    val textMeasurer = rememberTextMeasurer()
-    val selectedObject = analysis.objects[selectedIndex]
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(360.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(WorkshopPalette.Sunken),
-        ) {
-            Canvas(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(analysis, imageBitmap) {
-                        val transform = viewTransform(
-                            Size(size.width.toFloat(), size.height.toFloat()),
-                            bitmap,
-                            pixelsPerMm,
-                        )
-                        val thresholdMm = 30.dp.toPx() / transform.scale / pixelsPerMm
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val downMm = transform.toMm(down.position)
-                            val pinIndex = nearestPin(pins, downMm, thresholdMm)
-                            if (pinIndex != null) {
-                                drag(down.id) { change ->
-                                    val mm = transform.toMm(change.position)
-                                    val next = pins.toMutableList()
-                                    next[pinIndex] = Pt(
-                                        mm.x.coerceIn(0.0, transform.widthMm),
-                                        mm.y.coerceIn(0.0, transform.heightMm),
-                                    )
-                                    onPinsChange(next)
-                                    change.consume()
-                                }
-                            } else {
-                                val up = waitForUpOrCancellation()
-                                if (up != null) {
-                                    val mm = transform.toMm(up.position)
-                                    val hit = analysis.objects.indexOfFirst { objectGeometry ->
-                                        Geometry.contains(objectGeometry.outerContour, mm)
-                                    }
-                                    if (hit >= 0) onSelectObject(hit)
-                                }
-                            }
-                        }
-                    },
-            ) {
-                val transform = viewTransform(size, bitmap, pixelsPerMm)
-                drawRect(color = WorkshopPalette.Sunken)
-                drawImage(
-                    image = imageBitmap,
-                    srcOffset = IntOffset.Zero,
-                    srcSize = IntSize(bitmap.width, bitmap.height),
-                    dstOffset = IntOffset(
-                        transform.offsetX.roundToInt(),
-                        transform.offsetY.roundToInt(),
-                    ),
-                    dstSize = IntSize(
-                        (bitmap.width * transform.scale).roundToInt(),
-                        (bitmap.height * transform.scale).roundToInt(),
-                    ),
-                    filterQuality = FilterQuality.Medium,
-                )
-
-                analysis.objects.forEachIndexed { index, objectGeometry ->
-                    drawObjectContour(
-                        objectGeometry = objectGeometry,
-                        selected = index == selectedIndex,
-                        transform = transform,
-                    )
-                }
-
-                drawObjectAnnotations(
-                    objectGeometry = selectedObject,
-                    transform = transform,
-                    textMeasurer = textMeasurer,
-                )
-
-                drawPins(
-                    pins = pins,
-                    transform = transform,
-                    textMeasurer = textMeasurer,
-                    distanceMm = pinDistance,
-                    errorMm = pinError,
-                )
-            }
-        }
-
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = WorkshopPalette.Surface,
-            border = androidx.compose.foundation.BorderStroke(1.dp, WorkshopPalette.Border),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "TWO-PIN CALIPER",
-                        color = WorkshopPalette.Amber,
-                        fontFamily = Mono,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 9.sp,
-                        letterSpacing = 1.0.sp,
-                    )
-                    Text(
-                        text = Formats.mmWithError(pinDistance, pinError),
-                        color = WorkshopPalette.Amber,
-                        fontFamily = Mono,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                    )
-                }
-                Text(
-                    text = "Drag P1 / P2 · tap an object to select it",
-                    color = WorkshopPalette.TextFaint,
-                    fontSize = 10.sp,
-                )
-            }
-        }
-    }
-}
-
-private fun DrawScope.drawObjectContour(
-    objectGeometry: ObjectGeometry,
-    selected: Boolean,
-    transform: ViewTransform,
-) {
-    val path = Path()
-    objectGeometry.outerContour.forEachIndexed { index, point ->
-        val screen = transform.toScreen(point)
-        if (index == 0) path.moveTo(screen.x, screen.y) else path.lineTo(screen.x, screen.y)
-    }
-    path.close()
-
-    if (selected) {
-        drawPath(path, color = WorkshopPalette.Cyan.copy(alpha = 0.10f))
-    }
-    drawPath(
-        path = path,
-        color = if (selected) WorkshopPalette.Cyan else WorkshopPalette.Cyan.copy(alpha = 0.35f),
-        style = Stroke(
-            width = if (selected) 2.2.dp.toPx() else 1.2.dp.toPx(),
-            join = StrokeJoin.Round,
-            cap = StrokeCap.Round,
+        value = "Ø " + Formats.mmWithError(
+            hole.diameterMm * parallaxFactor,
+            hole.diameterErrorMm * parallaxFactor,
         ),
     )
 }
 
-private fun DrawScope.drawObjectAnnotations(
+// ---------------------------------------------------------------------------
+// Pin initialisation
+// ---------------------------------------------------------------------------
+
+private fun initialPins(
     objectGeometry: ObjectGeometry,
-    transform: ViewTransform,
-    textMeasurer: TextMeasurer,
-) {
-    objectGeometry.holes.forEach { hole ->
-        val centre = transform.toScreen(hole.centroid)
-        val radius = max(3.dp.toPx(), (hole.diameterMm / 2.0 * transform.pxPerMm * transform.scale).toFloat())
-        drawCircle(
-            color = WorkshopPalette.Amber,
-            radius = radius,
-            center = centre,
-            style = Stroke(width = 1.2.dp.toPx()),
-        )
-        drawLine(
-            color = WorkshopPalette.Amber,
-            start = Offset(centre.x - radius * 1.5f, centre.y),
-            end = Offset(centre.x + radius * 1.5f, centre.y),
-            strokeWidth = 1.dp.toPx(),
-        )
-        drawLine(
-            color = WorkshopPalette.Amber,
-            start = Offset(centre.x, centre.y - radius * 1.5f),
-            end = Offset(centre.x, centre.y + radius * 1.5f),
-            strokeWidth = 1.dp.toPx(),
-        )
-    }
-
-    val pairs = if (objectGeometry.holes.size <= 6) {
-        objectGeometry.holeSpacings
-    } else {
-        objectGeometry.holeSpacings.filter { it.secondIndex == it.firstIndex + 1 }
-    }
-    pairs.forEachIndexed { pairIndex, spacing ->
-        val first = transform.toScreen(objectGeometry.holes[spacing.firstIndex].centroid)
-        val second = transform.toScreen(objectGeometry.holes[spacing.secondIndex].centroid)
-        drawLine(
-            color = WorkshopPalette.Amber.copy(alpha = 0.75f),
-            start = first,
-            end = second,
-            strokeWidth = 1.dp.toPx(),
-            pathEffect = PathEffect.dashPathEffect(
-                floatArrayOf(5.dp.toPx(), 4.dp.toPx()),
-                0f,
-            ),
-        )
-        val mid = Offset((first.x + second.x) / 2f, (first.y + second.y) / 2f)
-        drawChipLabel(
-            textMeasurer = textMeasurer,
-            text = Formats.mmWithError(spacing.distanceMm, spacing.errorMm, digits = 1),
-            x = mid.x,
-            y = mid.y + if (pairIndex % 2 == 0) -10.dp.toPx() else 12.dp.toPx(),
-            textColor = WorkshopPalette.Amber,
-        )
-    }
-}
-
-private fun DrawScope.drawPins(
-    pins: List<Pt>,
-    transform: ViewTransform,
-    textMeasurer: TextMeasurer,
-    distanceMm: Double,
-    errorMm: Double,
-) {
-    if (pins.size < 2) return
-    val first = transform.toScreen(pins[0])
-    val second = transform.toScreen(pins[1])
-    drawLine(
-        color = WorkshopPalette.Emerald,
-        start = first,
-        end = second,
-        strokeWidth = 1.6.dp.toPx(),
-        pathEffect = PathEffect.dashPathEffect(
-            floatArrayOf(7.dp.toPx(), 5.dp.toPx()),
-            0f,
-        ),
-    )
-
-    val colours = listOf(WorkshopPalette.Emerald, WorkshopPalette.Amber)
-    pins.take(2).forEachIndexed { index, pin ->
-        val point = transform.toScreen(pin)
-        val colour = colours[index]
-        drawCircle(
-            color = WorkshopPalette.Background.copy(alpha = 0.65f),
-            radius = 13.dp.toPx(),
-            center = point,
-        )
-        drawCircle(
-            color = colour,
-            radius = 10.dp.toPx(),
-            center = point,
-            style = Stroke(width = 2.dp.toPx()),
-        )
-        drawCircle(color = colour, radius = 2.5.dp.toPx(), center = point)
-        drawLine(
-            color = colour,
-            start = Offset(point.x - 15.dp.toPx(), point.y),
-            end = Offset(point.x + 15.dp.toPx(), point.y),
-            strokeWidth = 1.dp.toPx(),
-        )
-        drawLine(
-            color = colour,
-            start = Offset(point.x, point.y - 15.dp.toPx()),
-            end = Offset(point.x, point.y + 15.dp.toPx()),
-            strokeWidth = 1.dp.toPx(),
-        )
-        drawChipLabel(
-            textMeasurer = textMeasurer,
-            text = "P${index + 1}",
-            x = point.x,
-            y = point.y - 24.dp.toPx(),
-            textColor = colour,
-        )
-    }
-
-    drawChipLabel(
-        textMeasurer = textMeasurer,
-        text = Formats.mmWithError(distanceMm, errorMm),
-        x = (first.x + second.x) / 2f,
-        y = (first.y + second.y) / 2f - 16.dp.toPx(),
-        textColor = WorkshopPalette.Emerald,
-    )
-}
-
-private fun DrawScope.drawChipLabel(
-    textMeasurer: TextMeasurer,
-    text: String,
-    x: Float,
-    y: Float,
-    textColor: Color,
-) {
-    val style = TextStyle(
-        color = textColor,
-        fontFamily = Mono,
-        fontWeight = FontWeight.Bold,
-        fontSize = 8.sp,
-    )
-    val measured = textMeasurer.measure(text, style)
-    val padX = 4.dp.toPx()
-    val padY = 2.dp.toPx()
-    val width = measured.size.width + padX * 2f
-    val height = measured.size.height + padY * 2f
-    drawRoundRect(
-        color = WorkshopPalette.Background.copy(alpha = 0.82f),
-        topLeft = Offset(x - width / 2f, y - height / 2f),
-        size = Size(width, height),
-        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-    )
-    drawText(
-        textMeasurer = textMeasurer,
-        text = text,
-        topLeft = Offset(x - measured.size.width / 2f, y - measured.size.height / 2f),
-        style = style,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// View transform + pin helpers
-// ---------------------------------------------------------------------------
-
-private data class ViewTransform(
-    val scale: Float,
-    val offsetX: Float,
-    val offsetY: Float,
-    val pxPerMm: Double,
-    val widthMm: Double,
-    val heightMm: Double,
-) {
-    fun toScreen(point: Pt): Offset = Offset(
-        x = offsetX + (point.x * pxPerMm * scale).toFloat(),
-        y = offsetY + (point.y * pxPerMm * scale).toFloat(),
-    )
-
-    fun toMm(position: Offset): Pt = Pt(
-        x = ((position.x - offsetX) / scale / pxPerMm),
-        y = ((position.y - offsetY) / scale / pxPerMm),
-    )
-}
-
-private fun viewTransform(
-    canvas: Size,
-    bitmap: Bitmap,
-    pixelsPerMm: Double,
-): ViewTransform {
-    val scale = min(
-        canvas.width / bitmap.width.toFloat(),
-        canvas.height / bitmap.height.toFloat(),
-    ).coerceAtLeast(0.0001f)
-    val drawWidth = bitmap.width * scale
-    val drawHeight = bitmap.height * scale
-    return ViewTransform(
-        scale = scale,
-        offsetX = (canvas.width - drawWidth) / 2f,
-        offsetY = (canvas.height - drawHeight) / 2f,
-        pxPerMm = pixelsPerMm,
-        widthMm = bitmap.width / pixelsPerMm,
-        heightMm = bitmap.height / pixelsPerMm,
-    )
-}
-
-private fun initialPins(objectGeometry: ObjectGeometry): List<Pt> {
-    if (objectGeometry.holes.size >= 2) {
-        return listOf(
+    canvasWidthMm: Double,
+    canvasHeightMm: Double,
+): Pair<Pt, Pt> {
+    val mmPins = if (objectGeometry.holes.size >= 2) {
+        listOf(
             objectGeometry.holes[0].centroid,
             objectGeometry.holes[1].centroid,
         )
+    } else {
+        val centreY = (objectGeometry.boundsMin.y + objectGeometry.boundsMax.y) / 2.0
+        val width = objectGeometry.boundsMax.x - objectGeometry.boundsMin.x
+        listOf(
+            Pt(objectGeometry.boundsMin.x + width * 0.25, centreY),
+            Pt(objectGeometry.boundsMin.x + width * 0.75, centreY),
+        )
     }
-    val centreY = (objectGeometry.boundsMin.y + objectGeometry.boundsMax.y) / 2.0
-    val width = objectGeometry.boundsMax.x - objectGeometry.boundsMin.x
-    return listOf(
-        Pt(objectGeometry.boundsMin.x + width * 0.25, centreY),
-        Pt(objectGeometry.boundsMin.x + width * 0.75, centreY),
-    )
+    return normalize(mmPins[0], canvasWidthMm, canvasHeightMm) to
+        normalize(mmPins[1], canvasWidthMm, canvasHeightMm)
 }
 
-private fun nearestPin(pins: List<Pt>, point: Pt, thresholdMm: Double): Int? {
-    var bestIndex: Int? = null
-    var bestDistance = thresholdMm
-    pins.forEachIndexed { index, pin ->
-        val distance = Geometry.distance(pin, point)
-        if (distance <= bestDistance) {
-            bestDistance = distance
-            bestIndex = index
-        }
-    }
-    return bestIndex
-}
+private fun normalize(
+    point: Pt,
+    canvasWidthMm: Double,
+    canvasHeightMm: Double,
+): Pt = Pt(
+    x = (point.x / canvasWidthMm).coerceIn(0.0, 1.0),
+    y = (point.y / canvasHeightMm).coerceIn(0.0, 1.0),
+)

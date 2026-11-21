@@ -104,6 +104,11 @@ object AppConfig {
 
         /** Above this length the ID-card mode is no longer recommended. */
         const val CARD_MAX_RECOMMENDED_OBJECT_MM = 250.0
+
+        /** Assumed handheld camera-to-plane distance for 3D parallax correction. */
+        const val CAMERA_DISTANCE_MM = 400.0
+        /** Maximum object height supported by the parallax slider. */
+        const val MAX_PARALLAX_HEIGHT_MM = 150.0
     }
 }
 
