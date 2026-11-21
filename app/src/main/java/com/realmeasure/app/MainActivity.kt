@@ -4,18 +4,17 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.realmeasure.app.ui.HistoryViewModel
 import com.realmeasure.app.ui.RealMeasureApp
 import com.realmeasure.app.ui.ScannerViewModel
+import com.realmeasure.app.ui.ScansViewModel
 import com.realmeasure.app.ui.theme.RealMeasureTheme
 
 /**
- * Single-activity host.
+ * Single-activity host for the planar irregular-shape scanner.
  *
- * Navigation between the hands-free scanner and the saved "My Hardware" list
- * is a bottom bar driven by simple Compose state - no navigation library, no
- * fragments, one window. Camera analysis is paused whenever the result, error
- * or onboarding modal is open.
+ * Navigation between the scanner and the saved "My Scans" library is a bottom
+ * bar driven by simple Compose state - no navigation library, no fragments,
+ * one window.
  */
 class MainActivity : ComponentActivity() {
 
@@ -24,10 +23,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             RealMeasureTheme {
                 val scannerViewModel: ScannerViewModel = viewModel()
-                val historyViewModel: HistoryViewModel = viewModel()
+                val scansViewModel: ScansViewModel = viewModel()
                 RealMeasureApp(
                     scannerViewModel = scannerViewModel,
-                    historyViewModel = historyViewModel,
+                    scansViewModel = scansViewModel,
                 )
             }
         }

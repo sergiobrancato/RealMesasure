@@ -13,8 +13,8 @@ android {
         applicationId = "com.realmeasure.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     buildTypes {
@@ -69,6 +69,7 @@ dependencies {
     // initialises it with OpenCVLoader.initLocal() in RealMeasureApp.
     implementation("org.opencv:opencv:4.10.0")
 
-    // JVM unit tests (StandardMatcherTest).
+    // JVM unit tests (uncertainty model, geometry, SVG).
+
     testImplementation("junit:junit:4.13.2")
 }

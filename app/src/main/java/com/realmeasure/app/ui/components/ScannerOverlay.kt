@@ -9,7 +9,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextMeasurer
@@ -21,125 +23,117 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.config.WorkshopPalette
+import com.realmeasure.app.model.ReferenceMode
+import com.realmeasure.app.ui.ScanUiState
 import com.realmeasure.app.ui.theme.Mono
 
 /**
- * Hands-free viewfinder HUD drawn with the native Compose Canvas.
+ * Viewfinders HUD for the planar scanner.
  *
- * Both alignment frames start **amber** while searching. Each frame switches
- * independently to **emerald green** the moment the live detector reports a
- * valid card / fastener inside it. When both are green, the bottom chip turns
- * into a stability progress bar - once it fills, the app captures
- * automatically (there is no shutter button).
+ * When the reference is detected the full quadrilateral is drawn in emerald
+ * green with corner targets; a stability ring at the bottom fills over five
+ * consecutive frames and automatically triggers the full-resolution capture.
+ * While searching, a subtle amber reticle marks the live detection area.
  */
 @Composable
 fun ScannerOverlay(
-    cardDetected: Boolean,
-    fastenerDetected: Boolean,
-    stabilityProgress: Float,
+    mode: ReferenceMode,
+    scanning: ScanUiState.Scanning?,
     modifier: Modifier = Modifier,
 ) {
     val textMeasurer = rememberTextMeasurer()
-    val guides = AppConfig.Guides
-    val cardColor = if (cardDetected) WorkshopPalette.Emerald else WorkshopPalette.Amber
-    val partColor = if (fastenerDetected) WorkshopPalette.Emerald else WorkshopPalette.Amber
-    val bothAligned = cardDetected && fastenerDetected
+    val quad = scanning?.referenceQuad
+    val tilt = scanning?.tiltDeg ?: 0.0
+    val progress = scanning?.stabilityProgress ?: 0f
+    val detected = scanning?.referenceDetected == true
+    val aligned = detected && tilt <= AppConfig.Detection.MAX_LIVE_TILT_DEG
+    val accent = when {
+        !detected -> WorkshopPalette.Amber
+        aligned -> WorkshopPalette.Emerald
+        else -> WorkshopPalette.Amber
+    }
 
     Canvas(modifier = modifier.fillMaxSize()) {
-        val width = size.width
-        val height = size.height
+        drawRect(color = WorkshopPalette.Background.copy(alpha = 0.18f))
 
-        // Slight dim so the guides and colours read clearly over any scene.
-        drawRect(color = WorkshopPalette.Background.copy(alpha = 0.20f))
-
-        // ---------------------------------------------------------------
-        // Left zone - ISO/IEC 7810 ID-1 card frame
-        // ---------------------------------------------------------------
-        val card = Rect(
-            left = (guides.CARD_X * width).toFloat(),
-            top = (guides.CARD_Y * height).toFloat(),
-            right = ((guides.CARD_X + guides.CARD_W) * width).toFloat(),
-            bottom = ((guides.CARD_Y + guides.CARD_H) * height).toFloat(),
-        )
-        drawSearchFrame(
-            rect = card,
-            color = cardColor,
-            textMeasurer = textMeasurer,
-            label = if (cardDetected) "BANK / ID CARD - OK" else "ALIGN BANK / ID CARD",
-            meta = "85.60 x 53.98 mm",
-        )
-
-        // ---------------------------------------------------------------
-        // Right zone - fastener target frame
-        // ---------------------------------------------------------------
-        val target = Rect(
-            left = (guides.TARGET_X * width).toFloat(),
-            top = (guides.TARGET_Y * height).toFloat(),
-            right = ((guides.TARGET_X + guides.TARGET_W) * width).toFloat(),
-            bottom = ((guides.TARGET_Y + guides.TARGET_H) * height).toFloat(),
-        )
-        drawSearchFrame(
-            rect = target,
-            color = partColor,
-            textMeasurer = textMeasurer,
-            label = if (fastenerDetected) "FASTENER - OK" else "PLACE FASTENER",
-            meta = "screw / bolt / hex key",
-            drawRuler = true,
-            drawCenterDot = true,
-        )
-
-        // ---------------------------------------------------------------
-        // Bottom status chip + stability progress
-        // ---------------------------------------------------------------
-        val chipWidth = minOf(width * 0.72f, 260.dp.toPx())
-        val chipHeight = 40.dp.toPx()
-        val chipLeft = (width - chipWidth) / 2f
-        val chipTop = height - chipHeight - 16.dp.toPx()
-        drawRoundRect(
-            color = WorkshopPalette.Background.copy(alpha = 0.86f),
-            topLeft = Offset(chipLeft, chipTop),
-            size = Size(chipWidth, chipHeight),
-            cornerRadius = CornerRadius(chipHeight / 2f, chipHeight / 2f),
-        )
-
-        val accent = if (bothAligned) WorkshopPalette.Emerald else WorkshopPalette.Amber
-        drawCircle(
-            color = accent,
-            radius = 3.dp.toPx(),
-            center = Offset(chipLeft + 14.dp.toPx(), chipTop + chipHeight * 0.34f),
-        )
-        drawText(
-            textMeasurer,
-            if (bothAligned) "ALIGNED - HOLD STEADY" else "AUTO-SCANNING",
-            topLeft = Offset(chipLeft + 22.dp.toPx(), chipTop + 6.dp.toPx()),
-            style = TextStyle(
+        if (quad == null || quad.size != 4) {
+            drawSearchReticle(mode, textMeasurer)
+        } else {
+            val points = quad.map {
+                Offset(
+                    x = (it.x * size.width).toFloat().coerceIn(0f, size.width),
+                    y = (it.y * size.height).toFloat().coerceIn(0f, size.height),
+                )
+            }
+            val path = Path().apply {
+                moveTo(points[0].x, points[0].y)
+                for (index in 1 until points.size) lineTo(points[index].x, points[index].y)
+                close()
+            }
+            drawPath(path, color = accent.copy(alpha = 0.08f))
+            drawPath(
+                path = path,
                 color = accent,
-                fontFamily = Mono,
-                fontWeight = FontWeight.Bold,
-                fontSize = 9.sp,
-                letterSpacing = 1.0.sp,
-            ),
-        )
-
-        // Progress track + fill (fills over ~750 ms).
-        val trackLeft = chipLeft + 12.dp.toPx()
-        val trackTop = chipTop + chipHeight - 10.dp.toPx()
-        val trackWidth = chipWidth - 24.dp.toPx()
-        val progress = stabilityProgress.coerceIn(0f, 1f)
-        drawRoundRect(
-            color = WorkshopPalette.Border,
-            topLeft = Offset(trackLeft, trackTop),
-            size = Size(trackWidth, 3.dp.toPx()),
-            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
-        )
-        if (progress > 0f) {
-            drawRoundRect(
-                color = accent,
-                topLeft = Offset(trackLeft, trackTop),
-                size = Size(trackWidth * progress, 3.dp.toPx()),
-                cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                style = Stroke(
+                    width = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    pathEffect = PathEffect.dashPathEffect(
+                        floatArrayOf(10.dp.toPx(), 6.dp.toPx()),
+                        0f,
+                    ),
+                ),
             )
+            points.forEach { point ->
+                drawCircle(color = WorkshopPalette.Background, radius = 7.dp.toPx(), center = point)
+                drawCircle(
+                    color = accent,
+                    radius = 5.dp.toPx(),
+                    center = point,
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+                drawCircle(color = accent, radius = 1.8.dp.toPx(), center = point)
+            }
+
+            val minX = points.minOf { it.x }
+            val minY = points.minOf { it.y }
+            val label = if (mode == ReferenceMode.CARD) "ID CARD TRACKED" else "A4 SHEET TRACKED"
+            drawText(
+                textMeasurer,
+                label,
+                topLeft = Offset(minX, (minY - 24.dp.toPx()).coerceAtLeast(6.dp.toPx())),
+                style = TextStyle(
+                    color = accent,
+                    fontFamily = Mono,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    letterSpacing = 1.0.sp,
+                ),
+            )
+            if (tilt > 6.0) {
+                drawText(
+                    textMeasurer,
+                    "TILT %.1f°".format(tilt),
+                    topLeft = Offset(minX, (minY - 10.dp.toPx()).coerceAtLeast(6.dp.toPx())),
+                    style = TextStyle(
+                        color = if (tilt > AppConfig.Detection.MAX_LIVE_TILT_DEG) {
+                            WorkshopPalette.Amber
+                        } else {
+                            WorkshopPalette.TextMuted
+                        },
+                        fontFamily = Mono,
+                        fontSize = 8.sp,
+                    ),
+                )
+            }
         }
+
+        drawStabilityRing(
+            textMeasurer = textMeasurer,
+            progress = progress,
+            accent = accent,
+            detected = detected,
+            aligned = aligned,
+        )
     }
 }
 
@@ -147,107 +141,104 @@ fun ScannerOverlay(
 // Drawing helpers
 // ---------------------------------------------------------------------------
 
-private fun DrawScope.drawSearchFrame(
-    rect: Rect,
-    color: Color,
+private fun DrawScope.drawSearchReticle(
+    mode: ReferenceMode,
     textMeasurer: TextMeasurer,
-    label: String,
-    meta: String,
-    drawRuler: Boolean = false,
-    drawCenterDot: Boolean = false,
 ) {
-    val stroke = 1.5.dp.toPx()
-    val dash = PathEffect.dashPathEffect(floatArrayOf(7.dp.toPx(), 5.dp.toPx()))
+    val inset = 10.dp.toPx()
+    val rect = Rect(
+        left = inset,
+        top = inset,
+        right = size.width - inset,
+        bottom = size.height - inset,
+    )
+    val dash = PathEffect.dashPathEffect(
+        floatArrayOf(6.dp.toPx(), 10.dp.toPx()),
+        0f,
+    )
     drawRoundRect(
-        color = color,
+        color = WorkshopPalette.Amber.copy(alpha = 0.34f),
         topLeft = Offset(rect.left, rect.top),
         size = Size(rect.width, rect.height),
-        cornerRadius = CornerRadius(14.dp.toPx(), 14.dp.toPx()),
-        style = Stroke(width = stroke, pathEffect = dash),
+        cornerRadius = CornerRadius(18.dp.toPx(), 18.dp.toPx()),
+        style = Stroke(width = 1.dp.toPx(), pathEffect = dash),
     )
-    drawRoundRect(
-        color = color.copy(alpha = 0.20f),
-        topLeft = Offset(rect.left + 6.dp.toPx(), rect.top + 6.dp.toPx()),
-        size = Size(
-            (rect.width - 12.dp.toPx()).coerceAtLeast(1f),
-            (rect.height - 12.dp.toPx()).coerceAtLeast(1f),
+    val label = if (mode == ReferenceMode.CARD) {
+        "SEARCHING · ID / CREDIT CARD"
+    } else {
+        "SEARCHING · A4 PAPER SHEET"
+    }
+    drawText(
+        textMeasurer,
+        label,
+        topLeft = Offset(
+            (size.width - textMeasurer.measure(label, TextStyle(fontSize = 9.sp)).size.width) / 2f,
+            22.dp.toPx(),
         ),
-        cornerRadius = CornerRadius(10.dp.toPx(), 10.dp.toPx()),
-        style = Stroke(width = 1f),
-    )
-    drawCornerBrackets(rect, color, stroke * 1.6f, 16.dp.toPx())
-
-    if (drawCenterDot) {
-        drawCircle(
-            color = color.copy(alpha = 0.5f),
-            radius = 7.dp.toPx(),
-            center = rect.center,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-    }
-    if (drawRuler) {
-        val rulerWidth = minOf(rect.width * 0.16f, 16.dp.toPx())
-        for (index in 0..10) {
-            val y = rect.top + (rect.height / 10f) * index
-            val major = index % 5 == 0
-            drawLine(
-                color = color.copy(alpha = if (major) 0.55f else 0.30f),
-                start = Offset(rect.left + 6.dp.toPx(), y),
-                end = Offset(
-                    rect.left + if (major) rulerWidth else rulerWidth * 0.62f,
-                    y,
-                ),
-                strokeWidth = if (major) 1.5.dp.toPx() else 1.dp.toPx(),
-            )
-        }
-    }
-
-    val labelStyle = TextStyle(
-        color = color,
-        fontFamily = Mono,
-        fontWeight = FontWeight.Bold,
-        fontSize = 9.sp,
-        letterSpacing = 0.8.sp,
-    )
-    val metaStyle = TextStyle(
-        color = WorkshopPalette.TextMuted,
-        fontFamily = Mono,
-        fontSize = 8.sp,
-    )
-    // Stack the two lines above the frame (label on top, meta below it) with
-    // enough room for the actual font metrics at any density.
-    drawText(
-        textMeasurer = textMeasurer,
-        text = label,
-        topLeft = Offset(rect.left, (rect.top - 27.dp.toPx()).coerceAtLeast(2.dp.toPx())),
-        style = labelStyle,
-    )
-    drawText(
-        textMeasurer = textMeasurer,
-        text = meta,
-        topLeft = Offset(rect.left, (rect.top - 14.dp.toPx()).coerceAtLeast(2.dp.toPx())),
-        style = metaStyle,
+        style = TextStyle(
+            color = WorkshopPalette.Amber.copy(alpha = 0.9f),
+            fontFamily = Mono,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp,
+            letterSpacing = 0.9.sp,
+        ),
     )
 }
 
-/** Four L-shaped corner marks for crisp edges. */
-private fun DrawScope.drawCornerBrackets(
-    rect: Rect,
-    color: Color,
-    strokeWidth: Float,
-    length: Float,
+private fun DrawScope.drawStabilityRing(
+    textMeasurer: TextMeasurer,
+    progress: Float,
+    accent: Color,
+    detected: Boolean,
+    aligned: Boolean,
 ) {
-    val pairs = listOf(
-        Offset(rect.left, rect.top) to Offset(rect.left + length, rect.top),
-        Offset(rect.left, rect.top) to Offset(rect.left, rect.top + length),
-        Offset(rect.right, rect.top) to Offset(rect.right - length, rect.top),
-        Offset(rect.right, rect.top) to Offset(rect.right, rect.top + length),
-        Offset(rect.left, rect.bottom) to Offset(rect.left + length, rect.bottom),
-        Offset(rect.left, rect.bottom) to Offset(rect.left, rect.bottom - length),
-        Offset(rect.right, rect.bottom) to Offset(rect.right - length, rect.bottom),
-        Offset(rect.right, rect.bottom) to Offset(rect.right, rect.bottom - length),
+    val radius = 20.dp.toPx()
+    val center = Offset(size.width / 2f, size.height - 38.dp.toPx())
+    drawCircle(
+        color = WorkshopPalette.Background.copy(alpha = 0.82f),
+        radius = radius + 7.dp.toPx(),
+        center = center,
     )
-    pairs.forEach { (start, end) ->
-        drawLine(color = color, start = start, end = end, strokeWidth = strokeWidth)
+    drawCircle(
+        color = WorkshopPalette.Border,
+        radius = radius,
+        center = center,
+        style = Stroke(width = 2.dp.toPx()),
+    )
+    if (progress > 0f) {
+        drawArc(
+            color = accent,
+            startAngle = -90f,
+            sweepAngle = 360f * progress.coerceIn(0f, 1f),
+            useCenter = false,
+            topLeft = Offset(center.x - radius, center.y - radius),
+            size = Size(radius * 2f, radius * 2f),
+            style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round),
+        )
     }
+    drawCircle(
+        color = accent,
+        radius = 4.dp.toPx(),
+        center = center,
+    )
+
+    val status = when {
+        !detected -> "SEARCHING"
+        !aligned -> "ALIGN REFERENCE"
+        progress >= 1f -> "CAPTURING"
+        progress > 0f -> "HOLD STEADY ${(progress * 5).toInt().coerceIn(1, 5)}/5"
+        else -> "HOLD STEADY"
+    }
+    drawText(
+        textMeasurer,
+        status,
+        topLeft = Offset(center.x + radius + 12.dp.toPx(), center.y - 6.dp.toPx()),
+        style = TextStyle(
+            color = accent,
+            fontFamily = Mono,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp,
+            letterSpacing = 0.8.sp,
+        ),
+    )
 }

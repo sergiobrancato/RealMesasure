@@ -3,166 +3,113 @@ package com.realmeasure.app.config
 import androidx.compose.ui.graphics.Color
 
 /**
- * Central tuning file for RealMeasure.
+ * Central tuning file for the planar CAD scanner.
  *
- * Everything a workshop might want to adjust lives here: ISO ID-1 reference
- * dimensions, viewfinder guide geometry, OpenCV thresholds, matching snap
- * tolerances, caliper fine-step and the design color tokens referenced by the
- * Compose theme. Editing a value here changes behaviour everywhere - no other
- * file needs to be touched for calibration or measurement tuning.
+ * Every threshold that affects detection, calibration, contour extraction or
+ * the uncertainty model lives here so the behaviour can be tuned without
+ * touching the algorithms.
  */
 object AppConfig {
     const val APP_NAME = "RealMeasure"
-    const val APP_VERSION = "1.0.0"
+    const val APP_VERSION = "2.0.0"
 
     // ------------------------------------------------------------------
-    // ISO/IEC 7810 ID-1 reference card
+    // Hands-free reference detection (live preview)
     // ------------------------------------------------------------------
-    /** Every bank card, ID card and most transit/loyalty cards. */
-    const val CARD_WIDTH_MM = 85.60
-    const val CARD_HEIGHT_MM = 53.98
-    const val CARD_ASPECT = CARD_WIDTH_MM / CARD_HEIGHT_MM // ~1.5858
+    object Detection {
+        /** Working width for the ~6-8 fps preview detector. */
+        const val WORKING_WIDTH_PX = 720
+        /** Minimum time between analysed preview frames (~7 fps). */
+        const val FRAME_INTERVAL_MS = 140L
+        /** Consecutive valid frames required before the still capture fires. */
+        const val REQUIRED_CONSECUTIVE_FRAMES = 5
+        /** Reject non-90-degree corners beyond this in the live tracker. */
+        const val MAX_LIVE_TILT_DEG = 12.0
+        /** Allowed relative aspect deviation from the reference's true ratio. */
+        const val ASPECT_TOLERANCE = 0.12
+        /** A reference must occupy at least this fraction of the preview frame. */
+        const val MIN_AREA_RATIO = 0.0012
+        const val MAX_AREA_RATIO = 0.92
+        /** approxPolyDP epsilon as a fraction of the contour perimeter. */
+        const val APPROX_EPSILON_RATIO = 0.02
+        /** Contour area / convex-hull area must be at least this. */
+        const val MIN_SOLIDITY = 0.78
+        /** Shortest accepted quad side in working pixels. */
+        const val MIN_QUAD_SIDE_PX = 32.0
+        /** Keep the whole reference at least this far from the frame border. */
+        const val EDGE_MARGIN_RATIO = 0.008
+        /** Mean grey value below which the scene is considered dark. */
+        const val LOW_LIGHT_MEAN = 45.0
 
-    /** Millimetres per inch. */
-    const val MM_PER_INCH = 25.4
-
-    // ------------------------------------------------------------------
-    // Capture geometry
-    // ------------------------------------------------------------------
-    object Capture {
-        /** Stage aspect (width / height). The captured bitmap is centre-cropped
-         *  to this ratio so normalised guide coordinates map 1:1. */
-        const val STAGE_ASPECT = 3.0 / 4.0
-    }
-
-    // ------------------------------------------------------------------
-    // Viewfinder guides (normalised to the 3:4 stage)
-    // ------------------------------------------------------------------
-    object Guides {
-        const val CARD_X = 0.035
-        const val CARD_Y = 0.16
-        const val CARD_W = 0.60
-        /** CARD_W * STAGE_ASPECT / CARD_ASPECT ~ 0.284 (drawn at true ID-1 ratio). */
-        const val CARD_H = 0.284
-        const val TARGET_X = 0.665
-        const val TARGET_Y = 0.10
-        const val TARGET_W = 0.30
-        const val TARGET_H = 0.72
-        /** Extra search margin around each guide when cropping the still photo. */
-        const val CARD_SEARCH_PADDING = 0.12
-        const val TARGET_SEARCH_PADDING = 0.08
-    }
-
-    // ------------------------------------------------------------------
-    // OpenCV tuning - card calibration
-    // ------------------------------------------------------------------
-    object CardCv {
-        const val GAUSSIAN_KERNEL = 5
-        const val CANNY_LOW = 30.0
-        const val CANNY_HIGH = 90.0
-        /** CLAHE settings that lift low-contrast card edges off a light desk. */
         const val CLAHE_CLIP_LIMIT = 2.0
         const val CLAHE_TILE_GRID = 8.0
-        /** Larger close kernel bridges gaps in the Canny card outline. */
-        const val EDGE_CLOSE_KERNEL = 9
-        const val ADAPTIVE_BLOCK = 31
-        const val ADAPTIVE_C = 7.0
-        /** approxPolyDP epsilon as a fraction of contour perimeter. */
-        const val APPROX_EPSILON_RATIO = 0.022
-        /** Card area must occupy at least / at most this fraction of the search crop. */
-        const val MIN_AREA_RATIO = 0.18
-        const val MAX_AREA_RATIO = 0.98
-        /** Maximum relative deviation from the 1.5858 ID-1 aspect ratio. */
-        const val MAX_ASPECT_ERROR = 0.22
-        /** Reject quads whose corners touch the search crop (card is clipped). */
-        const val EDGE_GUARD_RATIO = 0.015
-        /** Reject if horizontal/vertical scales disagree by more than this. */
-        const val MAX_SCALE_DISCREPANCY = 0.28
-        /** px/mm for the persisted rectified card thumbnail. */
-        const val RECTIFIED_PX_PER_MM = 10.0
+        const val CANNY_LOW = 32.0
+        const val CANNY_HIGH = 96.0
+        const val CLOSE_KERNEL = 5
     }
 
     // ------------------------------------------------------------------
-    // OpenCV tuning - fastener analysis
+    // Full-resolution calibration
     // ------------------------------------------------------------------
-    object FastenerCv {
-        const val GAUSSIAN_KERNEL = 5
+    object Calibration {
+        /** Downscale used only to find the reference in the still. */
+        const val DETECT_MAX_WIDTH_PX = 1800
+        /** Hard cap for the decoded still to prevent OOM on 48-108 MP sensors. */
+        const val MAX_SOURCE_WIDTH_PX = 4096
+        /** Largest flattened canvas; the px/mm scale is reduced if exceeded. */
+        const val MAX_CANVAS_PX = 4096
+        /** cornerSubPix window and stop criteria from the specification. */
+        const val SUBPIX_WIN = 11.0
+        const val SUBPIX_ITERATIONS = 30
+        const val SUBPIX_EPSILON = 0.01
+        /** Interior-angle deviation that invalidates a still. */
+        const val MAX_TILT_DEVIATION_DEG = 22.0
+        /** Margin around the reference when masking it out of the analysis. */
+        const val REFERENCE_MASK_MARGIN_MM = 3.0
+    }
+
+    // ------------------------------------------------------------------
+    // Irregular-shape contour analysis
+    // ------------------------------------------------------------------
+    object Analysis {
+        const val BINARY_BLOCK = 41
+        const val BINARY_C = 6.0
         const val CANNY_LOW = 35.0
         const val CANNY_HIGH = 110.0
-        const val ADAPTIVE_BLOCK = 31
-        const val ADAPTIVE_C = 5.0
-        const val MORPH_KERNEL = 3
-        /** Minimum long/short ratio for a live fastener contour. */
-        const val MIN_ELONGATION = 1.6
-        /** Short side floor in the downscaled detector (px). */
-        const val MIN_SHORT_SIDE_PX = 5.0
-        /** Contour must exceed this area (mm^2) after metric rectification. */
-        const val MIN_AREA_MM2 = 1.6
-        /** A head is a run at one end wider than shaftWidth * this ratio. */
-        const val HEAD_WIDTH_RATIO = 1.3
-        /** Heads longer than this fraction of the part are treated as noise. */
-        const val MAX_HEAD_LENGTH_FRACTION = 0.48
-        /** Number of bins used for the longitudinal width profile. */
-        const val PROFILE_BINS = 72
-        /** Robust shaft width percentile (lower ignores the head more strongly). */
-        const val SHAFT_WIDTH_PERCENTILE = 0.35
-        /** Physical extents a candidate contour must fit inside (mm). */
-        const val MIN_DIAMETER_MM = 0.8
-        const val MAX_DIAMETER_MM = 26.0
-        const val MIN_LENGTH_MM = 2.0
-        const val MAX_LENGTH_MM = 220.0
-        /** Pixel-per-mm of the perspective-rectified measurement crop. */
-        const val RECTIFIED_PX_PER_MM = 12.0
-        const val MAX_RECTIFIED_PX = 2600
-        // Contour score weights (sum to 1.0).
-        const val WEIGHT_AREA = 0.30
-        const val WEIGHT_ELONGATION = 0.25
-        const val WEIGHT_CENTER = 0.20
-        const val WEIGHT_EDGE_SHARPNESS = 0.25
+        const val CLOSE_KERNEL = 5
+        /** Smallest object worth measuring. */
+        const val MIN_OBJECT_AREA_MM2 = 20.0
+        /** Guard against a hand/table blob being treated as an object. */
+        const val MAX_OBJECT_AREA_MM2 = 4_000_000.0
+        const val MIN_HOLE_AREA_MM2 = 0.8
+        /** SVG polygon simplification tolerance. */
+        const val SVG_EPSILON_MM = 0.25
+        /** Objects touching the warped canvas border are incomplete. */
+        const val BORDER_MARGIN_PX = 3
     }
 
     // ------------------------------------------------------------------
-    // Hardware identification snap tolerances
+    // Uncertainty model
     // ------------------------------------------------------------------
-    object Matching {
-        const val ABSOLUTE_TOLERANCE_MM = 0.35
-        const val RELATIVE_TOLERANCE = 0.045
-        const val HEX_ABSOLUTE_TOLERANCE_MM = 0.30
-        const val HEX_RELATIVE_TOLERANCE = 0.06
-        const val MAX_ALTERNATIVES = 2
-    }
+    object ErrorModel {
+        /** 1-sigma edge localisation uncertainty in sensor pixels. */
+        const val SENSOR_EDGE_SIGMA_PX = 1.25
 
-    // ------------------------------------------------------------------
-    // Hands-free live scanning
-    // ------------------------------------------------------------------
-    object Live {
-        /** Downscaled width used by the per-frame detector (px). */
-        const val DETECT_WIDTH_PX = 640
-        /** CameraX ImageAnalysis target resolution (4:3, rotated to 3:4). */
-        const val ANALYSIS_WIDTH_PX = 1024
-        const val ANALYSIS_HEIGHT_PX = 768
-        /** Minimum time between analysed frames - ~6-7 fps keeps the UI smooth. */
-        const val FRAME_INTERVAL_MS = 150L
-        /** Consecutive valid frames required before auto-capture (~750 ms). */
-        const val REQUIRED_CONSECUTIVE_FRAMES = 5
-        /** Mean grey value below which the scene is considered dark. */
-        const val LOW_LIGHT_MEAN = 48.0
-        /** Minimum contour area as a fraction of the target-zone search crop. */
-        const val PART_MIN_AREA_RATIO = 0.012
-        /** Minimum contour fill ratio (area / bounding rectangle). */
-        const val PART_MIN_FILL_RATIO = 0.18
-        /** Smallest physically plausible diameter for auto-capture (mm). */
-        const val MIN_FASTENER_DIAMETER_MM = 1.5
-        /** Safety margin (fraction of the guide width) before "touches the frame". */
-        const val PART_EDGE_MARGIN_RATIO = 0.03
-        /** Maximum width of the bitmap handed to the full measurement pipeline. */
-        const val MEASURE_MAX_WIDTH_PX = 1024
+        /** Precision badge thresholds for the small-object reference. */
+        const val CARD_HIGH_PRECISION_MM = 0.6
+        const val CARD_MODERATE_PRECISION_MM = 1.5
+        /** Precision badge thresholds for the large-object reference. */
+        const val A4_HIGH_PRECISION_MM = 1.8
+        const val A4_MODERATE_PRECISION_MM = 3.5
+
+        /** Above this length the ID-card mode is no longer recommended. */
+        const val CARD_MAX_RECOMMENDED_OBJECT_MM = 250.0
     }
 }
 
 /**
- * Precision dark-workshop color tokens (referenced by the Compose theme and
- * every overlay/canvas drawing in the app).
+ * Precision dark-workshop color tokens referenced by the Compose theme and
+ * every canvas drawing in the app.
  */
 object WorkshopPalette {
     val Background = Color(0xFF0B0D10)

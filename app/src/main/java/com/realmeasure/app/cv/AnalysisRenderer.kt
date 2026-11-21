@@ -2,136 +2,146 @@ package com.realmeasure.app.cv
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
-import com.realmeasure.app.config.WorkshopPalette
-import com.realmeasure.app.model.CalibrationResult
-import com.realmeasure.app.model.CaliperHandles
-import com.realmeasure.app.model.FastenerMeasurement
-import com.realmeasure.app.model.Pt
+import android.graphics.Typeface
+import com.realmeasure.app.model.ObjectGeometry
+import java.util.Locale
 import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.roundToInt
 
 /**
- * Creates the two images returned in [ScanUiState.Success]:
+ * Renders the saved history thumbnail from the flattened metric canvas:
  *
- * - **annotated** - the frozen frame with the detected card quad and caliper
- *   lines drawn over it, shown in the result modal.
- * - **raw crop** - a tight, pad-around-the-fastener JPEG-friendly crop stored
- *   as the history thumbnail.
+ * - cyan outer contour,
+ * - amber hole centre crosshairs,
+ * - dashed amber hole-to-hole distance callouts,
+ * - selected object highlighted.
+ *
+ * The output is capped to [maxWidthPx] so saving a 4096 px canvas does not
+ * allocate a second full-size bitmap.
  */
 object AnalysisRenderer {
 
-    /** Draw the calibration card quad and the measured caliper lines. */
-    fun annotate(
-        source: Bitmap,
-        calibration: CalibrationResult,
-        measurement: FastenerMeasurement,
+    fun renderAnnotated(
+        warped: Bitmap,
+        objects: List<ObjectGeometry>,
+        selectedIndex: Int,
+        pixelsPerMm: Double,
+        maxWidthPx: Int = 1600,
     ): Bitmap {
-        val result = source.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(result)
-        val stroke = max(2f, source.width / 280f)
-
-        val emerald = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = WorkshopPalette.Emerald.copy(alpha = 0.95f).toArgbInt()
-            style = Paint.Style.STROKE
-            strokeWidth = stroke
-            strokeCap = Paint.Cap.ROUND
-        }
-        val cyan = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = WorkshopPalette.Cyan.copy(alpha = 0.95f).toArgbInt()
-            style = Paint.Style.STROKE
-            strokeWidth = stroke
-            strokeCap = Paint.Cap.ROUND
+        val source = if (warped.width > maxWidthPx) {
+            val height = (warped.height.toDouble() * maxWidthPx / warped.width)
+                .toInt()
+                .coerceAtLeast(1)
+            Bitmap.createScaledBitmap(warped, maxWidthPx, height, true)
+        } else {
+            warped
         }
 
-        // Card quad.
-        val quadPoints = Geometry.quadPoints(calibration.cardQuad)
-        if (quadPoints.size == 4) {
-            val path = Path().apply {
-                moveTo(quadPoints[0].x.toFloat(), quadPoints[0].y.toFloat())
-                for (index in 1 until quadPoints.size) {
-                    lineTo(quadPoints[index].x.toFloat(), quadPoints[index].y.toFloat())
-                }
-                close()
+        try {
+            val output = source.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = Canvas(output)
+            val scaleFactor = output.width.toDouble() / warped.width.toDouble()
+            val scale = (pixelsPerMm * scaleFactor).toFloat()
+            val stroke = max(2.0f, 0.15f * scale)
+            val labelTextSize = max(18.0f, 1.8f * scale)
+
+            val contourPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = stroke
+                strokeJoin = Paint.Join.ROUND
+                strokeCap = Paint.Cap.ROUND
             }
-            canvas.drawPath(path, emerald)
+            val selectedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+                color = Color.argb(28, 56, 189, 248)
+            }
+            val holePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                color = Color.rgb(245, 158, 11)
+                strokeWidth = max(1.5f, 0.08f * scale)
+            }
+            val calloutPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(245, 158, 11)
+                strokeWidth = max(1.0f, 0.05f * scale)
+                style = Paint.Style.STROKE
+                pathEffect = DashPathEffect(floatArrayOf(0.8f * scale, 0.55f * scale), 0f)
+            }
+            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(245, 158, 11)
+                textSize = labelTextSize
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            }
+
+            objects.forEachIndexed { index, objectGeometry ->
+                val selected = index == selectedIndex
+                val path = Path().apply {
+                    objectGeometry.outerContour.forEachIndexed { pointIndex, point ->
+                        val x = point.x.toFloat() * scale
+                        val y = point.y.toFloat() * scale
+                        if (pointIndex == 0) moveTo(x, y) else lineTo(x, y)
+                    }
+                    close()
+                }
+                if (selected) {
+                    canvas.drawPath(path, selectedPaint)
+                }
+                contourPaint.color = if (selected) {
+                    Color.rgb(56, 189, 248)
+                } else {
+                    Color.argb(130, 56, 189, 248)
+                }
+                canvas.drawPath(path, contourPaint)
+
+                objectGeometry.holes.forEach { hole ->
+                    val x = hole.centroid.x.toFloat() * scale
+                    val y = hole.centroid.y.toFloat() * scale
+                    val radius = max(3.0f, 0.8f * scale)
+                    canvas.drawCircle(x, y, radius, holePaint)
+                    canvas.drawLine(x - radius * 1.8f, y, x + radius * 1.8f, y, holePaint)
+                    canvas.drawLine(x, y - radius * 1.8f, x, y + radius * 1.8f, holePaint)
+                }
+
+                if (selected) {
+                    val pairs = if (objectGeometry.holes.size <= 6) {
+                        objectGeometry.holeSpacings
+                    } else {
+                        objectGeometry.holeSpacings.filter {
+                            it.secondIndex == it.firstIndex + 1
+                        }
+                    }
+                    pairs.forEach { spacing ->
+                        val first = objectGeometry.holes[spacing.firstIndex].centroid
+                        val second = objectGeometry.holes[spacing.secondIndex].centroid
+                        val startX = first.x.toFloat() * scale
+                        val startY = first.y.toFloat() * scale
+                        val endX = second.x.toFloat() * scale
+                        val endY = second.y.toFloat() * scale
+                        canvas.drawLine(startX, startY, endX, endY, calloutPaint)
+
+                        val label = String.format(
+                            Locale.US,
+                            "%.2f ± %.2f mm",
+                            spacing.distanceMm,
+                            spacing.errorMm,
+                        )
+                        canvas.drawText(
+                            label,
+                            (startX + endX) / 2f,
+                            (startY + endY) / 2f - 0.8f * scale,
+                            textPaint,
+                        )
+                    }
+                }
+            }
+
+            return output
+        } finally {
+            if (source !== warped && !source.isRecycled) {
+                source.recycle()
+            }
         }
-
-        // Measurement lines following the detected handles.
-        val handles = measurement.handles
-        val widthA = handles.widthA.toPixel(source)
-        val widthB = handles.widthB.toPixel(source)
-        val lengthA = handles.lengthA.toPixel(source)
-        val lengthB = handles.lengthB.toPixel(source)
-
-        canvas.drawLine(widthA.x.toFloat(), widthA.y.toFloat(), widthB.x.toFloat(), widthB.y.toFloat(), cyan)
-        canvas.drawLine(lengthA.x.toFloat(), lengthA.y.toFloat(), lengthB.x.toFloat(), lengthB.y.toFloat(), cyan)
-        drawTicks(canvas, widthA, widthB, cyan, stroke * 3f)
-        drawTicks(canvas, lengthA, lengthB, cyan, stroke * 3f)
-
-        return result
     }
-
-    /**
-     * Crop a padded rectangle around the four measurement handles. This is the
-     * image saved to the "My Hardware" history.
-     */
-    fun cropAroundFastener(source: Bitmap, handles: CaliperHandles): Bitmap {
-        val points = listOf(
-            handles.widthA.toPixel(source),
-            handles.widthB.toPixel(source),
-            handles.lengthA.toPixel(source),
-            handles.lengthB.toPixel(source),
-        )
-        val minX = points.minOf { it.x }
-        val maxX = points.maxOf { it.x }
-        val minY = points.minOf { it.y }
-        val maxY = points.maxOf { it.y }
-        val padding = max(maxX - minX, maxY - minY) * 0.22f + source.width * 0.02f
-        val left = (minX - padding).roundToInt().coerceIn(0, source.width - 1)
-        val top = (minY - padding).roundToInt().coerceIn(0, source.height - 1)
-        val right = (maxX + padding).roundToInt().coerceIn(left + 1, source.width)
-        val bottom = (maxY + padding).roundToInt().coerceIn(top + 1, source.height)
-        val cropWidth = max(48, right - left).coerceAtMost(source.width - left)
-        val cropHeight = max(48, bottom - top).coerceAtMost(source.height - top)
-        return try {
-            val subset = Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
-            // Make sure the history crop owns its pixels: the analysis frame is
-            // recycled as soon as this method returns.
-            val independent = subset.copy(Bitmap.Config.ARGB_8888, false)
-            if (independent !== subset) subset.recycle()
-            independent
-        } catch (exception: IllegalArgumentException) {
-            Bitmap.createScaledBitmap(source, 256, 256, true)
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    private fun com.realmeasure.app.model.NormPt.toPixel(bitmap: Bitmap): Pt =
-        Pt(x * bitmap.width, y * bitmap.height)
-
-    private fun drawTicks(canvas: Canvas, a: Pt, b: Pt, paint: Paint, length: Float) {
-        val dx = b.x - a.x
-        val dy = b.y - a.y
-        val norm = kotlin.math.hypot(dx, dy)
-        if (norm < 1e-3) return
-        val nx = (-dy / norm) * length
-        val ny = (dx / norm) * length
-        canvas.drawLine((a.x - nx).toFloat(), (a.y - ny).toFloat(), (a.x + nx).toFloat(), (a.y + ny).toFloat(), paint)
-        canvas.drawLine((b.x - nx).toFloat(), (b.y - ny).toFloat(), (b.x + nx).toFloat(), (b.y + ny).toFloat(), paint)
-    }
-
-    /** Compose Color -> ARGB int without importing the Compose graphics package here. */
-    private fun androidx.compose.ui.graphics.Color.toArgbInt(): Int =
-        android.graphics.Color.argb(
-            (alpha * 255).roundToInt(),
-            (red * 255).roundToInt(),
-            (green * 255).roundToInt(),
-            (blue * 255).roundToInt(),
-        )
 }

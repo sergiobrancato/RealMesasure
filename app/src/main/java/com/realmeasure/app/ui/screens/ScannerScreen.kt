@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.net.Uri
 import android.os.SystemClock
@@ -13,6 +15,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
@@ -34,14 +38,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
-import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,6 +67,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -71,41 +77,37 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.common.util.concurrent.ListenableFuture
 import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.config.WorkshopPalette
-import com.realmeasure.app.model.ScanMode
-import com.realmeasure.app.model.UnitSystem
-import com.realmeasure.app.ui.HistoryViewModel
+import com.realmeasure.app.model.ReferenceMode
 import com.realmeasure.app.ui.ScanUiState
 import com.realmeasure.app.ui.ScannerViewModel
+import com.realmeasure.app.ui.ScansViewModel
 import com.realmeasure.app.ui.components.ErrorModal
-import com.realmeasure.app.ui.components.ModeToggle
-import com.realmeasure.app.ui.components.ResultModal
+import com.realmeasure.app.ui.components.ReferenceModeSelector
 import com.realmeasure.app.ui.components.ScannerOverlay
-import com.realmeasure.app.ui.components.UnitToggle
 import com.realmeasure.app.ui.theme.Mono
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 
 /**
- * Hands-free scanner screen.
+ * Hands-free planar scanner screen.
  *
- * A CameraX [ImageAnalysis] use case feeds OpenCV zone checks at ~6-7 fps.
- * The Canvas HUD turns each alignment frame emerald as soon as its zone is
- * valid; when both are green for ~750 ms the ViewModel locks, runs the full
- * perspective-corrected measurement and opens the result modal. There is no
- * capture button.
+ * The preview stream runs the cheap reference detector at ~7 fps. When the
+ * selected reference is stable, the ViewModel emits a capture request and this
+ * screen grabs a full-resolution ImageCapture still at MAXIMIZE_QUALITY, which
+ * is then flattened and traced by the ViewModel.
  */
 @Composable
 fun ScannerScreen(
     viewModel: ScannerViewModel,
-    historyViewModel: HistoryViewModel,
+    scansViewModel: ScansViewModel,
     onShowOnboarding: () -> Unit,
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
-    val saving by historyViewModel.saving.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var hasPermission by remember {
@@ -135,44 +137,64 @@ fun ScannerScreen(
             .background(WorkshopPalette.Background)
             .statusBarsPadding(),
     ) {
-        ScannerHeader(
-            mode = ui.mode,
-            unit = ui.unit,
-            onMode = viewModel::setMode,
-            onUnit = viewModel::setUnit,
-            onShowOnboarding = onShowOnboarding,
-        )
+        ScannerHeader(onShowOnboarding = onShowOnboarding)
 
-        GuidancePill(scan = ui.scan)
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ReferenceModeSelector(
+                mode = ui.mode,
+                onChange = viewModel::setMode,
+            )
 
-        if (hasPermission) {
-            CameraStage(
-                scanState = ui.scan,
-                torchOn = ui.torch,
-                onTorch = viewModel::toggleTorch,
-                onFrame = viewModel::onFrame,
+            GuidancePill(scan = ui.scan)
+
+            if (hasPermission) {
+                CameraStage(
+                    mode = ui.mode,
+                    scanState = ui.scan,
+                    torchOn = ui.torch,
+                    onFrame = viewModel::onPreviewFrame,
+                    onStill = viewModel::onStillCaptured,
+                    onCaptureFailed = viewModel::onCaptureFailed,
+                    onTorch = viewModel::toggleTorch,
+                )
+            } else {
+                PermissionRationale(
+                    onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                    onOpenSettings = { context.openAppSettings() },
+                )
+            }
+
+            Text(
+                text = ui.mode.sizeHint,
+                color = WorkshopPalette.TextFaint,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
-        } else {
-            PermissionRationale(
-                onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) },
-                onOpenSettings = { context.openAppSettings() },
+            Text(
+                text = "NO SHUTTER · STABLE REFERENCE → AUTO CAPTURE",
+                color = WorkshopPalette.TextFaint,
+                fontFamily = Mono,
+                fontSize = 8.sp,
+                letterSpacing = 1.0.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
+            Spacer(Modifier.height(2.dp))
         }
     }
 
-    // Modals open ONLY from the two terminal states, and dismissing them
-    // resumes the live pipeline immediately.
     when (val scan = ui.scan) {
-        is ScanUiState.Success -> ResultModal(
-            success = scan,
-            saving = saving,
-            onSave = {
-                historyViewModel.save(
-                    result = scan.result,
-                    mode = scan.scanMode,
-                    bitmap = scan.rawCroppedBitmap,
-                )
-            },
+        is ScanUiState.Success -> ResultScreen(
+            analysis = scan.analysis,
+            scansViewModel = scansViewModel,
             onScanAnother = viewModel::resumeScanning,
         )
         is ScanUiState.Error -> ErrorModal(
@@ -188,18 +210,12 @@ fun ScannerScreen(
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun ScannerHeader(
-    mode: ScanMode,
-    unit: UnitSystem,
-    onMode: (ScanMode) -> Unit,
-    onUnit: (UnitSystem) -> Unit,
-    onShowOnboarding: () -> Unit,
-) {
+private fun ScannerHeader(onShowOnboarding: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -215,32 +231,24 @@ private fun ScannerHeader(
                     fontSize = 18.sp,
                 )
                 Text(
-                    text = "HANDS-FREE \u00B7 PRECISION \u00B7 OFFLINE",
+                    text = "PLANAR METROLOGY · 1:1 CAD",
                     color = WorkshopPalette.TextFaint,
                     fontFamily = Mono,
                     fontSize = 8.sp,
-                    letterSpacing = 1.3.sp,
+                    letterSpacing = 1.2.sp,
                 )
             }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                UnitToggle(unit = unit, onChange = onUnit)
-                IconButton(onClick = onShowOnboarding) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.HelpOutline,
-                        contentDescription = "How to scan",
-                        tint = WorkshopPalette.TextMuted,
-                    )
-                }
+            IconButton(onClick = onShowOnboarding) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.HelpOutline,
+                    contentDescription = "How to scan",
+                    tint = WorkshopPalette.TextMuted,
+                )
             }
         }
-        ModeToggle(mode = mode, onChange = onMode)
     }
 }
 
-/** High-contrast instruction pill that tracks the live state machine. */
 @Composable
 private fun GuidancePill(scan: ScanUiState) {
     val message: String
@@ -250,14 +258,14 @@ private fun GuidancePill(scan: ScanUiState) {
     when (scan) {
         is ScanUiState.Scanning -> {
             message = scan.guidanceMessage
-            accent = if (scan.cardDetected && scan.fastenerDetected) {
-                WorkshopPalette.Emerald
-            } else {
-                WorkshopPalette.Amber
+            accent = when {
+                scan.referenceDetected &&
+                    scan.tiltDeg <= AppConfig.Detection.MAX_LIVE_TILT_DEG -> WorkshopPalette.Emerald
+                else -> WorkshopPalette.Amber
             }
         }
         ScanUiState.Analyzing -> {
-            message = "Analyzing measurement\u2026"
+            message = "Flattening scene · tracing contours…"
             accent = WorkshopPalette.Cyan
         }
         else -> return
@@ -267,9 +275,7 @@ private fun GuidancePill(scan: ScanUiState) {
         shape = RoundedCornerShape(50),
         color = accent.copy(alpha = 0.10f),
         border = BorderStroke(1.dp, accent.copy(alpha = 0.45f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
@@ -302,15 +308,18 @@ private fun GuidancePill(scan: ScanUiState) {
 }
 
 // ---------------------------------------------------------------------------
-// Camera stage with live analysis
+// Camera stage
 // ---------------------------------------------------------------------------
 
 @Composable
 private fun CameraStage(
+    mode: ReferenceMode,
     scanState: ScanUiState,
     torchOn: Boolean,
-    onTorch: () -> Unit,
     onFrame: (Bitmap) -> Unit,
+    onStill: (Bitmap) -> Unit,
+    onCaptureFailed: (String) -> Unit,
+    onTorch: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -320,9 +329,14 @@ private fun CameraStage(
     }
     val analysisExecutor = remember {
         Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "realmeasure-camera-analysis").apply {
+            Thread(runnable, "realmeasure-preview-analysis").apply {
                 priority = Thread.NORM_PRIORITY - 1
             }
+        }
+    }
+    val captureExecutor = remember {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "realmeasure-still-capture")
         }
     }
     val imageAnalysis = remember {
@@ -331,8 +345,8 @@ private fun CameraStage(
             .setResolutionStrategy(
                 ResolutionStrategy(
                     android.util.Size(
-                        AppConfig.Live.ANALYSIS_WIDTH_PX,
-                        AppConfig.Live.ANALYSIS_HEIGHT_PX,
+                        AppConfig.Detection.WORKING_WIDTH_PX * 4 / 3,
+                        AppConfig.Detection.WORKING_WIDTH_PX,
                     ),
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
                 ),
@@ -343,7 +357,13 @@ private fun CameraStage(
             .setResolutionSelector(resolutionSelector)
             .build()
     }
+    val imageCapture = remember {
+        ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .build()
+    }
     val lastAnalyzedAt = remember { AtomicLong(0L) }
+    val capturing = remember { AtomicBoolean(false) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
     var provider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
@@ -366,9 +386,7 @@ private fun CameraStage(
                         .build(),
                 )
                 .build()
-                .also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
             imageAnalysis.setAnalyzer(analysisExecutor) { proxy ->
                 if (latestScanState.value !is ScanUiState.Scanning) {
@@ -376,7 +394,7 @@ private fun CameraStage(
                     return@setAnalyzer
                 }
                 val now = SystemClock.elapsedRealtime()
-                if (now - lastAnalyzedAt.get() < AppConfig.Live.FRAME_INTERVAL_MS) {
+                if (now - lastAnalyzedAt.get() < AppConfig.Detection.FRAME_INTERVAL_MS) {
                     proxy.close()
                     return@setAnalyzer
                 }
@@ -395,6 +413,7 @@ private fun CameraStage(
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
                 imageAnalysis,
+                imageCapture,
             )
         } catch (exception: Exception) {
             cameraError = exception.message ?: "Camera failed to start."
@@ -405,16 +424,57 @@ private fun CameraStage(
         camera?.cameraControl?.enableTorch(torchOn)
     }
 
+    // Full-resolution capture triggered by the stability lock. This is driven
+    // by the state itself (not a separate event) so a request can never race a
+    // stale composition.
+    val latestOnStill = rememberUpdatedState(onStill)
+    val latestOnCaptureFailed = rememberUpdatedState(onCaptureFailed)
+    LaunchedEffect(scanState, camera) {
+        if (scanState !is ScanUiState.Analyzing || camera == null) return@LaunchedEffect
+        if (!capturing.compareAndSet(false, true)) return@LaunchedEffect
+        imageCapture.takePicture(
+            captureExecutor,
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    try {
+                        val bitmap = image.toUprightBitmap()
+                        if (bitmap != null) {
+                            latestOnStill.value(bitmap)
+                        } else {
+                            latestOnCaptureFailed.value("Could not decode the captured photo.")
+                        }
+                    } catch (throwable: Throwable) {
+                        latestOnCaptureFailed.value(
+                            throwable.message ?: "Could not decode the captured photo.",
+                        )
+                    } finally {
+                        image.close()
+                        capturing.set(false)
+                    }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    capturing.set(false)
+                    latestOnCaptureFailed.value(
+                        exception.message ?: "The camera could not take the still photo.",
+                    )
+                }
+            },
+        )
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             imageAnalysis.clearAnalyzer()
             provider?.unbindAll()
             analysisExecutor.shutdown()
+            captureExecutor.shutdown()
         }
     }
 
     val hasFlash = camera?.cameraInfo?.hasFlashUnit() == true
     val scanning = scanState as? ScanUiState.Scanning
+    val analyzing = scanState is ScanUiState.Analyzing
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -423,21 +483,15 @@ private fun CameraStage(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
                 .aspectRatio(3f / 4f)
                 .clip(RoundedCornerShape(24.dp))
                 .background(Color.Black),
         ) {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
             ScannerOverlay(
-                cardDetected = scanning?.cardDetected == true,
-                fastenerDetected = scanning?.fastenerDetected == true,
-                stabilityProgress = scanning?.stabilityProgress ?: 0f,
+                mode = mode,
+                scanning = scanning,
             )
-
-            cameraError?.let { message ->
-                CameraErrorOverlay(message = message, onRetry = { bindAttempt += 1 })
-            }
 
             Surface(
                 shape = CircleShape,
@@ -453,30 +507,61 @@ private fun CameraStage(
                     modifier = Modifier.size(40.dp),
                 ) {
                     Icon(
-                        imageVector = if (torchOn) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff,
+                        imageVector = if (torchOn) {
+                            Icons.Filled.FlashlightOn
+                        } else {
+                            Icons.Filled.FlashlightOff
+                        },
                         contentDescription = if (torchOn) "Turn torch off" else "Turn torch on",
                         tint = if (torchOn) WorkshopPalette.Amber else WorkshopPalette.TextMuted,
                         modifier = Modifier.size(20.dp),
                     )
                 }
             }
+
+            if (analyzing) {
+                AnalyzingOverlay()
+            }
+
+            cameraError?.let { message ->
+                CameraErrorOverlay(message = message, onRetry = { bindAttempt += 1 })
+            }
         }
+    }
+}
 
-        Spacer(Modifier.height(10.dp))
-
-        Text(
-            text = "No shutter \u00B7 both frames green for a moment = measured",
-            color = WorkshopPalette.TextFaint,
-            fontSize = 10.sp,
-        )
-        Text(
-            text = "NO PHOTO LEAVES THIS DEVICE",
-            color = WorkshopPalette.TextFaint,
-            fontFamily = Mono,
-            fontSize = 8.sp,
-            letterSpacing = 1.2.sp,
-            modifier = Modifier.padding(top = 3.dp),
-        )
+@Composable
+private fun AnalyzingOverlay() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(WorkshopPalette.Background.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            CircularProgressIndicator(
+                color = WorkshopPalette.Cyan,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(30.dp),
+            )
+            Text(
+                text = "FLATTENING SCENE",
+                color = WorkshopPalette.Cyan,
+                fontFamily = Mono,
+                fontWeight = FontWeight.Bold,
+                fontSize = 10.sp,
+                letterSpacing = 1.2.sp,
+            )
+            Text(
+                text = "Full-resolution capture · corner refinement · contour tracing",
+                color = WorkshopPalette.TextMuted,
+                fontSize = 10.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 
@@ -509,7 +594,7 @@ private fun CameraErrorOverlay(message: String, onRetry: () -> Unit) {
                 text = message,
                 color = WorkshopPalette.TextMuted,
                 fontSize = 11.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                textAlign = TextAlign.Center,
             )
             Surface(
                 onClick = onRetry,
@@ -538,67 +623,60 @@ private fun CameraErrorOverlay(message: String, onRetry: () -> Unit) {
 private fun PermissionRationale(onRequest: () -> Unit, onOpenSettings: () -> Unit) {
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
+            .fillMaxWidth()
+            .padding(vertical = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(
             imageVector = Icons.Filled.Build,
             contentDescription = null,
             tint = WorkshopPalette.Amber,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(44.dp),
         )
-        Spacer(Modifier.height(16.dp))
         Text(
             text = "Camera access needed",
             color = WorkshopPalette.TextPrimary,
-            fontSize = 20.sp,
+            fontSize = 19.sp,
             fontWeight = FontWeight.Bold,
         )
-        Spacer(Modifier.height(8.dp))
         Text(
-            text = "RealMeasure uses the rear camera to calibrate against a bank/ID card and measure fasteners in real time. Photos never leave your device.",
+            text = "RealMeasure finds an ID card or A4 sheet, flattens the scene through a " +
+                "planar homography and traces object contours. Photos never leave this device.",
             color = WorkshopPalette.TextMuted,
-            fontSize = 13.sp,
-            lineHeight = 19.sp,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.Center,
         )
-        Spacer(Modifier.height(24.dp))
         Surface(
             onClick = onRequest,
             shape = CircleShape,
             color = WorkshopPalette.Amber,
+            modifier = Modifier.padding(top = 6.dp),
         ) {
             Text(
                 text = "ALLOW CAMERA",
                 color = WorkshopPalette.Background,
                 fontFamily = Mono,
                 fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 letterSpacing = 1.2.sp,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 13.dp),
             )
         }
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = "If the system no longer shows a prompt, enable Camera for RealMeasure in Settings.",
-            color = WorkshopPalette.TextFaint,
-            fontSize = 11.sp,
-        )
         Surface(
             onClick = onOpenSettings,
             shape = CircleShape,
             color = WorkshopPalette.Surface,
             border = BorderStroke(1.dp, WorkshopPalette.Border),
-            modifier = Modifier.padding(top = 10.dp),
         ) {
             Text(
                 text = "OPEN SETTINGS",
                 color = WorkshopPalette.Cyan,
                 fontFamily = Mono,
-                fontSize = 10.sp,
-                letterSpacing = 1.2.sp,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                fontSize = 9.sp,
+                letterSpacing = 1.1.sp,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 9.dp),
             )
         }
     }
@@ -632,16 +710,13 @@ private suspend fun <T> ListenableFuture<T>.await(context: android.content.Conte
     }
 
 /**
- * Convert an RGBA_8888 ImageProxy into an upright bitmap centre-cropped to the
- * 3:4 viewfinder stage. Guide coordinates then map 1:1 to analysed pixels.
+ * Convert a preview ImageProxy to an upright bitmap centre-cropped to the 3:4
+ * viewfinder stage. Reference polygon coordinates are normalised to this crop,
+ * so the overlay maps 1:1 to the preview.
  */
 private fun ImageProxy.toUprightStageBitmap(): Bitmap? {
     return try {
-        // CameraX handles YUV_420_888 (and JPEG) conversion for us; doing it
-        // by hand on the RGBA plane produced all-black frames on several
-        // MediaTek devices.
         var current: Bitmap = toBitmap()
-
         val rotation = imageInfo.rotationDegrees
         if (rotation != 0) {
             val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
@@ -650,7 +725,7 @@ private fun ImageProxy.toUprightStageBitmap(): Bitmap? {
             current = rotated
         }
 
-        val targetAspect = AppConfig.Capture.STAGE_ASPECT
+        val targetAspect = 3.0 / 4.0
         val aspect = current.width.toDouble() / current.height
         if (abs(aspect - targetAspect) > 0.01) {
             val cropped = if (aspect > targetAspect) {
@@ -676,10 +751,10 @@ private fun ImageProxy.toUprightStageBitmap(): Bitmap? {
             current = cropped
         }
 
-        if (current.width > AppConfig.Live.MEASURE_MAX_WIDTH_PX) {
-            val targetWidth = AppConfig.Live.MEASURE_MAX_WIDTH_PX
-            val targetHeight = (current.height.toDouble() * targetWidth / current.width).toInt()
-            val scaled = Bitmap.createScaledBitmap(current, targetWidth, targetHeight, true)
+        val maxWidth = AppConfig.Detection.WORKING_WIDTH_PX * 2
+        if (current.width > maxWidth) {
+            val height = (current.height.toDouble() * maxWidth / current.width).toInt()
+            val scaled = Bitmap.createScaledBitmap(current, maxWidth, height, true)
             if (scaled !== current) current.recycle()
             current = scaled
         }
@@ -687,4 +762,59 @@ private fun ImageProxy.toUprightStageBitmap(): Bitmap? {
     } catch (throwable: Throwable) {
         null
     }
+}
+
+/**
+ * Full-resolution still, rotated upright but **not** cropped: the calibrator
+ * needs the whole sensor image so the translated homography can preserve every
+ * pixel of the scene.
+ *
+ * JPEG stills are decoded with a power-of-two inSampleSize so a 48–108 MP
+ * sensor never allocates a full-size ARGB bitmap. The decoded long edge is
+ * capped at [AppConfig.Calibration.MAX_SOURCE_WIDTH_PX] pixels, which is still
+ * far more resolution than the 4096 px warp canvas can use.
+ */
+private fun ImageProxy.toUprightBitmap(): Bitmap? {
+    return try {
+        var current: Bitmap = if (format == ImageFormat.JPEG) {
+            decodeJpegSampled() ?: return null
+        } else {
+            toBitmap()
+        }
+        val rotation = imageInfo.rotationDegrees
+        if (rotation != 0) {
+            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+            val rotated = Bitmap.createBitmap(current, 0, 0, current.width, current.height, matrix, true)
+            if (rotated !== current) current.recycle()
+            current = rotated
+        }
+        current
+    } catch (throwable: Throwable) {
+        null
+    }
+}
+
+private fun ImageProxy.decodeJpegSampled(): Bitmap? {
+    val plane = planes.firstOrNull() ?: return null
+    val buffer = plane.buffer
+    buffer.rewind()
+    val bytes = ByteArray(buffer.remaining())
+    buffer.get(bytes)
+    if (bytes.isEmpty()) return null
+
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+    val maxEdge = AppConfig.Calibration.MAX_SOURCE_WIDTH_PX
+    var sample = 1
+    while (bounds.outWidth / sample > maxEdge || bounds.outHeight / sample > maxEdge) {
+        sample *= 2
+    }
+
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }

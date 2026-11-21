@@ -3,27 +3,56 @@ package com.realmeasure.app.ui
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
-/** Shared display formatting for the modals and history cards. */
+/** Shared numeric formatting for the scanner result and history cards. */
 object Formats {
-
-    fun mm(value: Float, digits: Int = 2): String =
-        String.format(Locale.US, "%.${digits}f mm", value)
 
     fun mm(value: Double, digits: Int = 2): String =
         String.format(Locale.US, "%.${digits}f mm", value)
 
-    fun length(value: Float?): String = value?.let { mm(it, 1) } ?: "-"
+    fun mm(value: Float, digits: Int = 2): String =
+        String.format(Locale.US, "%.${digits}f mm", value)
 
-    fun matchError(valueMm: Float): String = mm(valueMm, 2)
+    /** `12.34 ± 0.21 mm` */
+    fun mmWithError(value: Double, error: Double, digits: Int = 2): String =
+        String.format(
+            Locale.US,
+            "%.${digits}f ± %.${digits}f mm",
+            value,
+            abs(error),
+        )
+
+    /** `12.34 ± 0.15 cm²` */
+    fun cm2WithError(value: Double, error: Double, digits: Int = 2): String =
+        String.format(
+            Locale.US,
+            "%.${digits}f ± %.${digits}f cm²",
+            value,
+            abs(error),
+        )
+
+    /** `120.40 ± 0.42 × 80.10 ± 0.31 mm` */
+    fun dimensionsWithError(
+        lengthMm: Double,
+        lengthErrorMm: Double,
+        widthMm: Double,
+        widthErrorMm: Double,
+    ): String = String.format(
+        Locale.US,
+        "%.2f ± %.2f × %.2f ± %.2f mm",
+        lengthMm,
+        abs(lengthErrorMm),
+        widthMm,
+        abs(widthErrorMm),
+    )
+
+    fun degrees(value: Double): String =
+        String.format(Locale.US, "%.1f°", value)
 
     fun timestamp(timestamp: Long): String =
-        SimpleDateFormat("dd MMM yyyy \u00B7 HH:mm", Locale.getDefault()).format(Date(timestamp))
+        SimpleDateFormat("dd MMM yyyy · HH:mm", Locale.getDefault()).format(Date(timestamp))
 
-    fun hardwareSummary(diameterMm: Float, lengthMm: Float?): String =
-        if (lengthMm != null) {
-            "${mm(diameterMm)} across - ${mm(lengthMm, 1)} long"
-        } else {
-            "${mm(diameterMm)} across flats"
-        }
+    fun count(value: Int, singular: String, plural: String): String =
+        "$value ${if (value == 1) singular else plural}"
 }

@@ -36,11 +36,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextMeasurer
@@ -53,20 +53,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.config.WorkshopPalette
+import com.realmeasure.app.model.ReferenceMode
 import com.realmeasure.app.ui.theme.Mono
 
 /**
- * First-run "How to Scan" tutorial, also reopenable from the `?` button.
- *
- * Contains a custom Canvas diagram (top-down matte table, card in the left
- * green frame, bolt in the right green frame), three plain-language tips and
- * the "Don't show again" persistence choice.
+ * First-run tutorial, also reopenable from the `?` button. The diagram adapts
+ * to the selected reference mode and shows the true relative scale of an ID
+ * card or A4 sheet beside an irregular bracket with two holes.
  */
 @Composable
-fun OnboardingModal(onDismiss: (dontShowAgain: Boolean) -> Unit) {
+fun OnboardingModal(
+    mode: ReferenceMode,
+    onDismiss: (dontShowAgain: Boolean) -> Unit,
+) {
     var dontShowAgain by remember { mutableStateOf(false) }
     val textMeasurer = rememberTextMeasurer()
+    val referenceName = if (mode == ReferenceMode.CARD) "ID card" else "A4 sheet"
 
     Dialog(
         onDismissRequest = { onDismiss(false) },
@@ -78,8 +82,8 @@ fun OnboardingModal(onDismiss: (dontShowAgain: Boolean) -> Unit) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(WorkshopPalette.Background.copy(alpha = 0.80f))
-                .padding(20.dp),
+                .background(WorkshopPalette.Background.copy(alpha = 0.82f))
+                .padding(18.dp),
             contentAlignment = Alignment.Center,
         ) {
             Surface(
@@ -88,13 +92,13 @@ fun OnboardingModal(onDismiss: (dontShowAgain: Boolean) -> Unit) {
                 border = BorderStroke(1.dp, WorkshopPalette.Border),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 800.dp),
+                    .heightIn(max = 820.dp),
             ) {
                 Column(
                     modifier = Modifier
                         .verticalScroll(rememberScrollState())
                         .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(13.dp),
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -112,14 +116,17 @@ fun OnboardingModal(onDismiss: (dontShowAgain: Boolean) -> Unit) {
                     }
 
                     Text(
-                        text = "Hands-free measuring",
+                        text = "Flatten any shape into CAD",
                         color = WorkshopPalette.TextPrimary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 22.sp,
                         letterSpacing = (-0.3).sp,
                     )
                     Text(
-                        text = "Lay everything on a flat surface and let the camera do the work. There is no shutter button - once both frames turn green, RealMeasure captures and measures automatically.",
+                        text = "Choose a reference that matches the object size. Lay the $referenceName " +
+                            "flat beside the object on a contrasting matte surface. The camera tracks the " +
+                            "reference live and automatically captures a full-resolution photo when it is " +
+                            "stable — there is no shutter button.",
                         color = WorkshopPalette.TextMuted,
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
@@ -128,27 +135,31 @@ fun OnboardingModal(onDismiss: (dontShowAgain: Boolean) -> Unit) {
                     Canvas(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(210.dp)
+                            .height(228.dp)
                             .clip(RoundedCornerShape(16.dp))
                             .background(WorkshopPalette.Sunken),
                     ) {
-                        drawOnboardingDiagram(textMeasurer)
+                        drawOnboardingDiagram(mode, textMeasurer)
                     }
 
                     TipRow(
                         number = "1",
-                        title = "Use a plain, matte surface",
-                        body = "A dark desk or a sheet of paper beats a reflective or cluttered workbench.",
+                        title = "Use a contrasting matte surface",
+                        body = "A dark object on light paper — or a light object on a dark mat — gives the " +
+                            "cleanest contour and avoids glare being mistaken for an edge.",
                     )
                     TipRow(
                         number = "2",
-                        title = "Hold the phone flat and parallel",
-                        body = "Keep the camera parallel to the table so the card stays a true rectangle.",
+                        title = "Keep the reference flat and fully visible",
+                        body = "All four edges must be in frame. Smooth the sheet or card, avoid reflections " +
+                            "and keep a small gap between the reference and the object.",
                     )
                     TipRow(
                         number = "3",
-                        title = "Keep the fastener inside the right box",
-                        body = "Head and tip fully visible. Both frames turn green when the scene is aligned.",
+                        title = "Hold the phone parallel to the table",
+                        body = "The live tilt gate needs corners within " +
+                            "${AppConfig.Detection.MAX_LIVE_TILT_DEG.toInt()}° of square. The app " +
+                            "captures automatically after five stable frames, then flattens the whole scene.",
                     )
 
                     Row(
@@ -182,7 +193,7 @@ fun OnboardingModal(onDismiss: (dontShowAgain: Boolean) -> Unit) {
                             color = WorkshopPalette.Background,
                             fontFamily = Mono,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             letterSpacing = 1.1.sp,
                             textAlign = TextAlign.Center,
                             modifier = Modifier
@@ -243,79 +254,132 @@ private fun TipRow(number: String, title: String, body: String) {
 // Canvas diagram
 // ---------------------------------------------------------------------------
 
-private fun DrawScope.drawOnboardingDiagram(textMeasurer: TextMeasurer) {
+private fun DrawScope.drawOnboardingDiagram(
+    mode: ReferenceMode,
+    textMeasurer: TextMeasurer,
+) {
     val emerald = WorkshopPalette.Emerald
-    val cardWhite = Color(0xFFE8EAEF)
     val cyan = WorkshopPalette.Cyan
+    val amber = WorkshopPalette.Amber
+    val matte = Color(0xFF1B2028)
 
-    // Matte table surface.
     drawRoundRect(
-        color = Color(0xFF1B2028),
+        color = matte,
         topLeft = Offset.Zero,
         size = size,
         cornerRadius = CornerRadius(14f, 14f),
     )
-    for (index in 1..5) {
-        val y = size.height * index / 6f
+    // Subtle workbench grid.
+    for (index in 1..6) {
+        val y = size.height * index / 7f
         drawLine(
-            color = WorkshopPalette.Border.copy(alpha = 0.5f),
+            color = WorkshopPalette.Border.copy(alpha = 0.45f),
             start = Offset(12f, y),
             end = Offset(size.width - 12f, y),
             strokeWidth = 1f,
         )
     }
 
-    val dash = PathEffect.dashPathEffect(floatArrayOf(9f, 6f))
+    if (mode == ReferenceMode.CARD) {
+        drawCardReference(textMeasurer, emerald, amber)
+        drawBracketObject(
+            textMeasurer = textMeasurer,
+            left = size.width * 0.58f,
+            top = size.height * 0.20f,
+            width = size.width * 0.32f,
+            height = size.height * 0.60f,
+            accent = cyan,
+        )
+    } else {
+        drawA4Reference(textMeasurer, emerald, amber)
+        drawBracketObject(
+            textMeasurer = textMeasurer,
+            left = size.width * 0.68f,
+            top = size.height * 0.20f,
+            width = size.width * 0.26f,
+            height = size.height * 0.60f,
+            accent = cyan,
+        )
+    }
 
-    // ---- Left: ID-1 card inside a green guide frame -------------------
-    val cardFrame = Rect(
-        left = size.width * 0.05f,
-        top = size.height * 0.17f,
-        right = size.width * 0.47f,
-        bottom = size.height * 0.79f,
+    drawText(
+        textMeasurer,
+        "CONTRASTING MATTE BACKGROUND",
+        topLeft = Offset(size.width * 0.05f, size.height - 18f),
+        style = TextStyle(
+            color = WorkshopPalette.TextFaint,
+            fontFamily = Mono,
+            fontSize = 7.sp,
+            letterSpacing = 1.0.sp,
+        ),
+    )
+}
+
+private fun DrawScope.drawCardReference(
+    textMeasurer: TextMeasurer,
+    emerald: Color,
+    amber: Color,
+) {
+    val width = size.width * 0.34f
+    val height = width / 1.5858f
+    val left = size.width * 0.08f
+    val top = (size.height - height) / 2f
+
+    drawRoundRect(
+        color = emerald.copy(alpha = 0.08f),
+        topLeft = Offset(left - 8f, top - 8f),
+        size = Size(width + 16f, height + 16f),
+        cornerRadius = CornerRadius(10f, 10f),
     )
     drawRoundRect(
         color = emerald,
-        topLeft = Offset(cardFrame.left, cardFrame.top),
-        size = Size(cardFrame.width, cardFrame.height),
-        cornerRadius = CornerRadius(8f, 8f),
-        style = Stroke(width = 2.5f, pathEffect = dash),
+        topLeft = Offset(left - 8f, top - 8f),
+        size = Size(width + 16f, height + 16f),
+        cornerRadius = CornerRadius(10f, 10f),
+        style = Stroke(
+            width = 1.8f,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(7f, 5f), 0f),
+        ),
     )
-
-    val cardInset = 10f
-    val cardWidth = cardFrame.width - cardInset * 2f
-    val cardHeight = cardWidth / 1.5858f
-    val cardLeft = cardFrame.left + cardInset
-    val cardTop = cardFrame.top + (cardFrame.height - cardHeight) / 2f
     drawRoundRect(
-        color = cardWhite,
-        topLeft = Offset(cardLeft, cardTop),
-        size = Size(cardWidth, cardHeight),
-        cornerRadius = CornerRadius(7f, 7f),
+        color = Color(0xFFE8EAEF),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = CornerRadius(6f, 6f),
     )
-    // Chip
     drawRoundRect(
-        color = WorkshopPalette.Amber,
-        topLeft = Offset(cardLeft + cardWidth * 0.07f, cardTop + cardHeight * 0.30f),
-        size = Size(cardWidth * 0.16f, cardHeight * 0.22f),
-        cornerRadius = CornerRadius(3f, 3f),
+        color = amber,
+        topLeft = Offset(left + width * 0.07f, top + height * 0.28f),
+        size = Size(width * 0.16f, height * 0.24f),
+        cornerRadius = CornerRadius(2f, 2f),
     )
-    // Number stripes
     drawRect(
         color = Color(0xFF374151),
-        topLeft = Offset(cardLeft + cardWidth * 0.07f, cardTop + cardHeight * 0.66f),
-        size = Size(cardWidth * 0.52f, cardHeight * 0.07f),
+        topLeft = Offset(left + width * 0.07f, top + height * 0.66f),
+        size = Size(width * 0.50f, height * 0.06f),
     )
     drawRect(
         color = Color(0xFF9CA3AF),
-        topLeft = Offset(cardLeft + cardWidth * 0.07f, cardTop + cardHeight * 0.78f),
-        size = Size(cardWidth * 0.36f, cardHeight * 0.05f),
+        topLeft = Offset(left + width * 0.07f, top + height * 0.78f),
+        size = Size(width * 0.34f, height * 0.05f),
+    )
+    drawCircle(
+        color = amber.copy(alpha = 0.6f),
+        radius = height * 0.10f,
+        center = Offset(left + width * 0.82f, top + height * 0.30f),
+        style = Stroke(width = 1.5f),
+    )
+    drawCircle(
+        color = Color(0xFF38BDF8).copy(alpha = 0.7f),
+        radius = height * 0.10f,
+        center = Offset(left + width * 0.72f, top + height * 0.30f),
+        style = Stroke(width = 1.5f),
     )
 
     drawText(
         textMeasurer,
-        "ID-1 CARD",
-        topLeft = Offset(cardFrame.left, cardFrame.top - 18f),
+        "ID CARD · REFERENCE",
+        topLeft = Offset(left - 8f, top - 22f),
         style = TextStyle(
             color = emerald,
             fontFamily = Mono,
@@ -326,74 +390,74 @@ private fun DrawScope.drawOnboardingDiagram(textMeasurer: TextMeasurer) {
     )
     drawText(
         textMeasurer,
-        "85.60 x 53.98 mm",
-        topLeft = Offset(cardFrame.left, cardFrame.bottom + 5f),
+        "85.60 × 53.98 mm",
+        topLeft = Offset(left - 8f, top + height + 12f),
         style = TextStyle(
             color = WorkshopPalette.TextFaint,
             fontFamily = Mono,
             fontSize = 8.sp,
         ),
     )
+}
 
-    // ---- Right: fastener inside a green guide frame -------------------
-    val partFrame = Rect(
-        left = size.width * 0.55f,
-        top = size.height * 0.10f,
-        right = size.width * 0.94f,
-        bottom = size.height * 0.90f,
+private fun DrawScope.drawA4Reference(
+    textMeasurer: TextMeasurer,
+    emerald: Color,
+    amber: Color,
+) {
+    val width = size.width * 0.53f
+    val height = width / 1.41429f
+    val left = size.width * 0.06f
+    val top = (size.height - height) / 2f
+
+    drawRoundRect(
+        color = emerald.copy(alpha = 0.08f),
+        topLeft = Offset(left - 7f, top - 7f),
+        size = Size(width + 14f, height + 14f),
+        cornerRadius = CornerRadius(9f, 9f),
     )
     drawRoundRect(
         color = emerald,
-        topLeft = Offset(partFrame.left, partFrame.top),
-        size = Size(partFrame.width, partFrame.height),
-        cornerRadius = CornerRadius(10f, 10f),
-        style = Stroke(width = 2.5f, pathEffect = dash),
+        topLeft = Offset(left - 7f, top - 7f),
+        size = Size(width + 14f, height + 14f),
+        cornerRadius = CornerRadius(9f, 9f),
+        style = Stroke(
+            width = 1.8f,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(7f, 5f), 0f),
+        ),
     )
-
-    // Bolt: hex head + shaft + thread ticks (vertical).
-    val centerX = partFrame.center.x
-    val headRadius = minOf(partFrame.width * 0.20f, 26f)
-    val headCenterY = partFrame.top + partFrame.height * 0.24f
-    val hexPath = Path().apply {
-        for (index in 0 until 6) {
-            val angle = Math.toRadians(60.0 * index - 30.0)
-            val x = centerX + (headRadius * kotlin.math.cos(angle)).toFloat()
-            val y = headCenterY + (headRadius * kotlin.math.sin(angle)).toFloat()
-            if (index == 0) moveTo(x, y) else lineTo(x, y)
-        }
-        close()
-    }
-    drawPath(hexPath, color = Color(0xFFC9D2DC))
-    drawCircle(
-        color = WorkshopPalette.Background,
-        radius = headRadius * 0.42f,
-        center = Offset(centerX, headCenterY),
-    )
-
-    val shaftTop = headCenterY + headRadius * 0.9f
-    val shaftBottom = partFrame.bottom - partFrame.height * 0.08f
-    val shaftWidth = headRadius * 0.95f
     drawRoundRect(
-        color = Color(0xFFB8C1CC),
-        topLeft = Offset(centerX - shaftWidth / 2f, shaftTop),
-        size = Size(shaftWidth, shaftBottom - shaftTop),
+        color = Color(0xFFF1F3F6),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
         cornerRadius = CornerRadius(3f, 3f),
     )
-    var threadY = shaftTop + 8f
-    while (threadY < shaftBottom - 4f) {
+    // Printed header + ruler lines to read as an A4 sheet.
+    drawRect(
+        color = amber.copy(alpha = 0.85f),
+        topLeft = Offset(left + width * 0.08f, top + height * 0.10f),
+        size = Size(width * 0.36f, height * 0.035f),
+    )
+    for (index in 0..5) {
+        val y = top + height * (0.22f + index * 0.08f)
         drawLine(
-            color = Color(0xFF5C6775),
-            start = Offset(centerX - shaftWidth / 2f + 2f, threadY),
-            end = Offset(centerX + shaftWidth / 2f - 2f, threadY),
-            strokeWidth = 1f,
+            color = Color(0xFF64748B),
+            start = Offset(left + width * 0.08f, y),
+            end = Offset(left + width * (0.50f + (index % 3) * 0.10f), y),
+            strokeWidth = 1.2f,
         )
-        threadY += 9f
     }
+    drawCircle(
+        color = Color(0xFF94A3B8),
+        radius = width * 0.05f,
+        center = Offset(left + width * 0.84f, top + height * 0.25f),
+        style = Stroke(width = 1.2f),
+    )
 
     drawText(
         textMeasurer,
-        "FASTENER",
-        topLeft = Offset(partFrame.left, partFrame.top - 18f),
+        "A4 SHEET · REFERENCE",
+        topLeft = Offset(left - 7f, top - 22f),
         style = TextStyle(
             color = emerald,
             fontFamily = Mono,
@@ -402,24 +466,103 @@ private fun DrawScope.drawOnboardingDiagram(textMeasurer: TextMeasurer) {
             letterSpacing = 0.8.sp,
         ),
     )
-
-    // Small "auto" hint between the zones.
     drawText(
         textMeasurer,
-        "AUTO",
-        topLeft = Offset(size.width * 0.47f, size.height * 0.46f),
+        "297 × 210 mm",
+        topLeft = Offset(left - 7f, top + height + 12f),
         style = TextStyle(
-            color = cyan,
+            color = WorkshopPalette.TextFaint,
+            fontFamily = Mono,
+            fontSize = 8.sp,
+        ),
+    )
+}
+
+private fun DrawScope.drawBracketObject(
+    textMeasurer: TextMeasurer,
+    left: Float,
+    top: Float,
+    width: Float,
+    height: Float,
+    accent: Color,
+) {
+    val right = left + width
+    val bottom = top + height
+    val path = Path().apply {
+        moveTo(left, top + height * 0.20f)
+        lineTo(left + width * 0.58f, top + height * 0.20f)
+        lineTo(left + width * 0.58f, top)
+        lineTo(right, top)
+        lineTo(right, top + height * 0.52f)
+        lineTo(left + width * 0.78f, top + height * 0.52f)
+        lineTo(left + width * 0.78f, bottom)
+        lineTo(left, bottom)
+        close()
+    }
+    drawPath(path, color = accent.copy(alpha = 0.07f))
+    drawPath(
+        path,
+        color = accent,
+        style = Stroke(width = 2f, cap = StrokeCap.Round),
+    )
+
+    data class Hole(val x: Float, val y: Float, val r: Float)
+    val holes = listOf(
+        Hole(left + width * 0.22f, top + height * 0.36f, width * 0.075f),
+        Hole(left + width * 0.22f, top + height * 0.76f, width * 0.075f),
+        Hole(right - width * 0.16f, top + height * 0.25f, width * 0.065f),
+    )
+    holes.forEach { hole ->
+        drawCircle(color = WorkshopPalette.Sunken, radius = hole.r, center = Offset(hole.x, hole.y))
+        drawCircle(
+            color = WorkshopPalette.Amber,
+            radius = hole.r,
+            center = Offset(hole.x, hole.y),
+            style = Stroke(width = 1.4f),
+        )
+        drawLine(
+            color = WorkshopPalette.Amber,
+            start = Offset(hole.x - hole.r * 1.7f, hole.y),
+            end = Offset(hole.x + hole.r * 1.7f, hole.y),
+            strokeWidth = 1f,
+        )
+        drawLine(
+            color = WorkshopPalette.Amber,
+            start = Offset(hole.x, hole.y - hole.r * 1.7f),
+            end = Offset(hole.x, hole.y + hole.r * 1.7f),
+            strokeWidth = 1f,
+        )
+    }
+    // Dashed centre-to-centre callout.
+    drawLine(
+        color = WorkshopPalette.Amber.copy(alpha = 0.75f),
+        start = Offset(holes[0].x, holes[0].y),
+        end = Offset(holes[1].x, holes[1].y),
+        strokeWidth = 1.2f,
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 4f), 0f),
+    )
+    drawText(
+        textMeasurer,
+        "24.0 mm",
+        topLeft = Offset(holes[0].x + 8f, (holes[0].y + holes[1].y) / 2f - 4f),
+        style = TextStyle(
+            color = WorkshopPalette.Amber,
+            fontFamily = Mono,
+            fontWeight = FontWeight.Bold,
+            fontSize = 7.sp,
+        ),
+    )
+
+    drawText(
+        textMeasurer,
+        "IRREGULAR OBJECT",
+        topLeft = Offset(left, top - 22f),
+        style = TextStyle(
+            color = accent,
             fontFamily = Mono,
             fontWeight = FontWeight.Bold,
             fontSize = 8.sp,
-            letterSpacing = 1.sp,
+            letterSpacing = 0.8.sp,
         ),
-    )
-    drawLine(
-        color = cyan.copy(alpha = 0.6f),
-        start = Offset(size.width * 0.48f, size.height * 0.53f),
-        end = Offset(size.width * 0.54f, size.height * 0.53f),
-        strokeWidth = 1.5f,
     )
 }

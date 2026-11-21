@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -26,32 +26,32 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.realmeasure.app.config.WorkshopPalette
 import com.realmeasure.app.data.AppPreferences
 import com.realmeasure.app.ui.components.OnboardingModal
-import com.realmeasure.app.ui.screens.HistoryScreen
 import com.realmeasure.app.ui.screens.ScannerScreen
+import com.realmeasure.app.ui.screens.ScansScreen
 import com.realmeasure.app.ui.theme.Mono
 
 /**
- * App shell: bottom navigation between the hands-free scanner and the saved
- * hardware history, plus the first-run onboarding modal.
+ * App shell: bottom navigation between the hands-free planar scanner and the
+ * saved "My Scans" library, plus the first-run tutorial gate.
  */
 @Composable
 fun RealMeasureApp(
     scannerViewModel: ScannerViewModel,
-    historyViewModel: HistoryViewModel,
+    scansViewModel: ScansViewModel,
 ) {
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context) }
+    val scannerUi by scannerViewModel.ui.collectAsStateWithLifecycle()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showOnboarding by rememberSaveable {
         mutableStateOf(!preferences.onboardingDismissed)
     }
 
-    // The tutorial covers the viewfinder, so stop consuming frames while it is
-    // open; dismissing it resumes live scanning immediately.
     LaunchedEffect(showOnboarding) {
         scannerViewModel.setPaused(showOnboarding)
     }
@@ -85,17 +85,17 @@ fun RealMeasureApp(
                     selected = selectedTab == 1,
                     onClick = {
                         selectedTab = 1
-                        historyViewModel.refresh()
+                        scansViewModel.refresh()
                     },
                     icon = {
                         Icon(
-                            imageVector = Icons.Filled.Build,
-                            contentDescription = "My Hardware",
+                            imageVector = Icons.Filled.GridView,
+                            contentDescription = "My Scans",
                         )
                     },
                     label = {
                         Text(
-                            text = "MY HARDWARE",
+                            text = "MY SCANS",
                             fontFamily = Mono,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
@@ -115,11 +115,11 @@ fun RealMeasureApp(
             when (selectedTab) {
                 0 -> ScannerScreen(
                     viewModel = scannerViewModel,
-                    historyViewModel = historyViewModel,
+                    scansViewModel = scansViewModel,
                     onShowOnboarding = { showOnboarding = true },
                 )
-                else -> HistoryScreen(
-                    viewModel = historyViewModel,
+                else -> ScansScreen(
+                    viewModel = scansViewModel,
                     onShowOnboarding = { showOnboarding = true },
                 )
             }
@@ -128,6 +128,7 @@ fun RealMeasureApp(
 
     if (showOnboarding) {
         OnboardingModal(
+            mode = scannerUi.mode,
             onDismiss = { dontShowAgain ->
                 if (dontShowAgain) preferences.onboardingDismissed = true
                 showOnboarding = false

@@ -1,103 +1,198 @@
 package com.realmeasure.app.cv
 
-import com.realmeasure.app.model.CaliperHandles
-import com.realmeasure.app.model.CardQuad
-import com.realmeasure.app.model.NormPt
 import com.realmeasure.app.model.Pt
 import kotlin.math.abs
+import kotlin.math.acos
 import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.sin
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * Pure geometry and homography math shared by the calibrator, the analyzer
- * and the interactive caliper. No Android/ OpenCV imports - everything here
- * is JVM-unit-testable.
+ * Pure planar geometry used by the calibrator, analyzer, SVG exporter and the
+ * JVM unit tests. No Android or OpenCV imports live here.
  */
 object Geometry {
 
     // ------------------------------------------------------------------
-    // Quad helpers
+    // Quad ordering + tilt gate
     // ------------------------------------------------------------------
 
-    /** Order four arbitrary points as TL -> TR -> BR -> BL. */
-    fun orderQuad(points: List<Pt>): CardQuad {
+    /**
+     * Order four arbitrary points clockwise starting at the top-left, using
+     * the extremes of (x + y) and (y - x).
+     */
+    fun orderQuad(points: List<Pt>): List<Pt> {
         require(points.size == 4) { "orderQuad expected 4 points, received ${points.size}" }
 
-        val sums = points.map { it.x + it.y }
-        val diffs = points.map { it.x - it.y }
+        val topLeft = points.minByOrNull { it.x + it.y }!!
+        val bottomRight = points.maxByOrNull { it.x + it.y }!!
+        val topRight = points.minByOrNull { it.y - it.x }!!
+        val bottomLeft = points.maxByOrNull { it.y - it.x }!!
 
-        fun indexOfExtreme(values: List<Double>, max: Boolean): Int {
-            var best = 0
-            for (i in 1 until values.size) {
-                val current = values[i]
-                val previous = values[best]
-                val better = if (max) current > previous else current < previous
-                if (better) best = i
-            }
-            return best
-        }
-
-        val topLeft = points[indexOfExtreme(sums, max = false)]
-        val bottomRight = points[indexOfExtreme(sums, max = true)]
-        val topRight = points[indexOfExtreme(diffs, max = true)]
-        val bottomLeft = points[indexOfExtreme(diffs, max = false)]
-
-        val unique = setOf(
-            "${topLeft.x},${topLeft.y}",
-            "${topRight.x},${topRight.y}",
-            "${bottomRight.x},${bottomRight.y}",
-            "${bottomLeft.x},${bottomLeft.y}",
-        )
+        val unique = setOf(topLeft, topRight, bottomRight, bottomLeft)
         if (unique.size == 4) {
-            return CardQuad(topLeft, topRight, bottomRight, bottomLeft)
+            return listOf(topLeft, topRight, bottomRight, bottomLeft)
         }
 
-        // Degenerate sum/diff ordering (extreme perspective): fall back to an
-        // angular sort around the centroid.
-        val center = points.reduce { acc, p -> Pt(acc.x + p.x / 4.0, acc.y + p.y / 4.0) }
+        // Degenerate sum/diff ordering (extreme perspective): sort angularly
+        // around the centroid and start at the top-left-most point.
+        val center = Pt(points.sumOf { it.x } / 4.0, points.sumOf { it.y } / 4.0)
         val angular = points.sortedBy { atan2(it.y - center.y, it.x - center.x) }
-        var startIndex = 0
-        var bestSum = Double.POSITIVE_INFINITY
-        angular.forEachIndexed { index, p ->
-            val sum = p.x + p.y
-            if (sum < bestSum) {
-                bestSum = sum
-                startIndex = index
-            }
-        }
-        val rotated = angular.drop(startIndex) + angular.take(startIndex)
-        return CardQuad(rotated[0], rotated[1], rotated[2], rotated[3])
+        val start = angular.indices.minByOrNull { angular[it].x + angular[it].y } ?: 0
+        val rotated = angular.drop(start) + angular.take(start)
+        return rotated
     }
 
-    fun quadPoints(quad: CardQuad): List<Pt> =
-        listOf(quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft)
+    /**
+     * Rotate a clockwise quad so the long physical edge is P0 -> P1. This
+     * lets portrait and landscape ID cards / A4 sheets both map their long
+     * side to the reference's width in millimetres.
+     */
+    fun orientLongEdgeFirst(quad: List<Pt>): List<Pt> {
+        require(quad.size == 4)
+        val horizontal = distance(quad[0], quad[1])
+        val vertical = distance(quad[1], quad[2])
+        return if (horizontal >= vertical) quad else listOf(quad[1], quad[2], quad[3], quad[0])
+    }
 
-    /** Average width/height of the quad in pixels. */
-    fun quadSides(quad: CardQuad): Pair<Double, Double> {
-        val width = (distance(quad.topLeft, quad.topRight) + distance(quad.bottomLeft, quad.bottomRight)) / 2.0
-        val height = (distance(quad.topLeft, quad.bottomLeft) + distance(quad.topRight, quad.bottomRight)) / 2.0
+    /**
+     * Interior angle at each corner in degrees, following the exact
+     * specification:
+     *   u = P[(i+1) % 4] - P[i]
+     *   v = P[(i+3) % 4] - P[i]
+     *   theta = acos((u.v) / (|u||v|)) * 180/pi
+     */
+    fun interiorAnglesDeg(quad: List<Pt>): List<Double> {
+        require(quad.size == 4)
+        return quad.indices.map { index ->
+            val current = quad[index]
+            val next = quad[(index + 1) % 4]
+            val previous = quad[(index + 3) % 4]
+            val ux = next.x - current.x
+            val uy = next.y - current.y
+            val vx = previous.x - current.x
+            val vy = previous.y - current.y
+            val uLength = hypot(ux, uy)
+            val vLength = hypot(vx, vy)
+            if (uLength < 1e-9 || vLength < 1e-9) {
+                0.0
+            } else {
+                val cosine = ((ux * vx + uy * vy) / (uLength * vLength)).coerceIn(-1.0, 1.0)
+                Math.toDegrees(acos(cosine))
+            }
+        }
+    }
+
+    /** Max |theta - 90| across the four corners, in degrees. */
+    fun maxTiltDeviationDeg(quad: List<Pt>): Double =
+        interiorAnglesDeg(quad).maxOfOrNull { abs(it - 90.0) } ?: 180.0
+
+    /** Average width (P0-P1 / P3-P2) and height (P0-P3 / P1-P2). */
+    fun quadSides(quad: List<Pt>): Pair<Double, Double> {
+        require(quad.size == 4)
+        val width = (distance(quad[0], quad[1]) + distance(quad[3], quad[2])) / 2.0
+        val height = (distance(quad[0], quad[3]) + distance(quad[1], quad[2])) / 2.0
         return width to height
     }
 
+    // ------------------------------------------------------------------
+    // Polygon helpers
+    // ------------------------------------------------------------------
+
+    fun distance(a: Pt, b: Pt): Double = hypot(a.x - b.x, a.y - b.y)
+
+    /** Absolute shoelace area. */
     fun polygonArea(points: List<Pt>): Double {
+        if (points.size < 3) return 0.0
         var sum = 0.0
-        for (i in points.indices) {
-            val current = points[i]
-            val next = points[(i + 1) % points.size]
+        for (index in points.indices) {
+            val current = points[index]
+            val next = points[(index + 1) % points.size]
             sum += current.x * next.y - next.x * current.y
         }
         return abs(sum) / 2.0
     }
 
-    fun distance(a: Pt, b: Pt): Double = hypot(a.x - b.x, a.y - b.y)
+    /** Polygon centroid (area-weighted); falls back to the mean for degenerates. */
+    fun polygonCentroid(points: List<Pt>): Pt {
+        if (points.isEmpty()) return Pt(0.0, 0.0)
+        var twiceArea = 0.0
+        var cx = 0.0
+        var cy = 0.0
+        for (index in points.indices) {
+            val current = points[index]
+            val next = points[(index + 1) % points.size]
+            val cross = current.x * next.y - next.x * current.y
+            twiceArea += cross
+            cx += (current.x + next.x) * cross
+            cy += (current.y + next.y) * cross
+        }
+        if (abs(twiceArea) < 1e-12) {
+            return Pt(points.sumOf { it.x } / points.size, points.sumOf { it.y } / points.size)
+        }
+        val factor = 1.0 / (3.0 * twiceArea)
+        return Pt(cx * factor, cy * factor)
+    }
+
+    fun bounds(points: List<Pt>): Pair<Pt, Pt> {
+        if (points.isEmpty()) return Pt(0.0, 0.0) to Pt(0.0, 0.0)
+        return Pt(
+            points.minOf { it.x },
+            points.minOf { it.y },
+        ) to Pt(
+            points.maxOf { it.x },
+            points.maxOf { it.y },
+        )
+    }
+
+    /** Ray-crossing point-in-polygon test. */
+    fun contains(polygon: List<Pt>, point: Pt): Boolean {
+        if (polygon.size < 3) return false
+        var inside = false
+        var previous = polygon.last()
+        for (current in polygon) {
+            val intersects = (current.y > point.y) != (previous.y > point.y) &&
+                point.x < (previous.x - current.x) * (point.y - current.y) /
+                ((previous.y - current.y).takeIf { abs(it) > 1e-12 } ?: 1e-12) + current.x
+            if (intersects) inside = !inside
+            previous = current
+        }
+        return inside
+    }
 
     // ------------------------------------------------------------------
-    // Homography math (row-major 3x3)
+    // Homography helpers (row-major 3x3)
     // ------------------------------------------------------------------
 
-    /** Apply a 3x3 homography to a point. */
+    fun translation(dx: Double, dy: Double): DoubleArray = doubleArrayOf(
+        1.0, 0.0, dx,
+        0.0, 1.0, dy,
+        0.0, 0.0, 1.0,
+    )
+
+    fun scaling(factor: Double): DoubleArray = doubleArrayOf(
+        factor, 0.0, 0.0,
+        0.0, factor, 0.0,
+        0.0, 0.0, 1.0,
+    )
+
+    /** Row-major 3x3 multiplication: returns a * b. */
+    fun multiply3x3(a: DoubleArray, b: DoubleArray): DoubleArray {
+        require(a.size == 9 && b.size == 9)
+        val result = DoubleArray(9)
+        for (row in 0 until 3) {
+            for (column in 0 until 3) {
+                var sum = 0.0
+                for (k in 0 until 3) {
+                    sum += a[row * 3 + k] * b[k * 3 + column]
+                }
+                result[row * 3 + column] = sum
+            }
+        }
+        return result
+    }
+
     fun applyH(h: DoubleArray, p: Pt): Pt {
         val denominator = h[6] * p.x + h[7] * p.y + h[8]
         if (abs(denominator) < 1e-12) return Pt(Double.NaN, Double.NaN)
@@ -107,163 +202,11 @@ object Geometry {
         )
     }
 
-    /** Invert a 3x3 homography. */
-    fun invert3x3(h: DoubleArray): DoubleArray {
-        val (a, b, c) = Triple(h[0], h[1], h[2])
-        val (d, e, f) = Triple(h[3], h[4], h[5])
-        val (g, i, j) = Triple(h[6], h[7], h[8])
-        val determinant = a * (e * j - f * i) - b * (d * j - f * g) + c * (d * i - e * g)
-        require(abs(determinant) > 1e-12) { "Homography is not invertible" }
-        val inverse = 1.0 / determinant
-        return doubleArrayOf(
-            (e * j - f * i) * inverse,
-            (c * i - b * j) * inverse,
-            (b * f - c * e) * inverse,
-            (f * g - d * j) * inverse,
-            (a * j - c * g) * inverse,
-            (c * d - a * f) * inverse,
-            (d * i - e * g) * inverse,
-            (b * g - a * i) * inverse,
-            (a * e - b * d) * inverse,
-        )
-    }
+    fun isFinite(value: Double): Boolean = value.isFinite()
 
-    /** Mean corner reprojection error for [src] -> [dst] under [h]. */
-    fun reprojectionError(h: DoubleArray, src: List<Pt>, dst: List<Pt>): Double {
-        if (src.isEmpty()) return Double.POSITIVE_INFINITY
-        var total = 0.0
-        for (index in src.indices) {
-            val mapped = applyH(h, src[index])
-            total += distance(mapped, dst[index])
-        }
-        return total / src.size
-    }
+    fun mean(values: List<Double>): Double =
+        if (values.isEmpty()) 0.0 else values.sum() / values.size
 
-    // ------------------------------------------------------------------
-    // Statistics
-    // ------------------------------------------------------------------
-
-    fun median(values: List<Double>): Double {
-        if (values.isEmpty()) return 0.0
-        val sorted = values.sorted()
-        val middle = sorted.size / 2
-        return if (sorted.size % 2 == 1) sorted[middle] else (sorted[middle - 1] + sorted[middle]) / 2.0
-    }
-
-    /** Linear-interpolated percentile where p is in [0, 1]. */
-    fun percentile(values: List<Double>, p: Double): Double {
-        if (values.isEmpty()) return 0.0
-        val sorted = values.sorted()
-        val position = p.coerceIn(0.0, 1.0) * (sorted.size - 1)
-        val lower = kotlin.math.floor(position).toInt()
-        val upper = kotlin.math.ceil(position).toInt()
-        val lo = sorted[lower]
-        val hi = sorted[upper]
-        return lo + (hi - lo) * (position - lower)
-    }
-
-    // ------------------------------------------------------------------
-    // Caliper handles
-    // ------------------------------------------------------------------
-
-    private fun normToPx(p: NormPt, imageW: Int, imageH: Int): Pt = Pt(p.x * imageW, p.y * imageH)
-
-    private fun pxToNorm(p: Pt, imageW: Int, imageH: Int): NormPt =
-        NormPt(p.x / imageW, p.y / imageH)
-
-    private fun clampNorm(p: NormPt): NormPt =
-        NormPt(p.x.coerceIn(0.0, 1.0), p.y.coerceIn(0.0, 1.0))
-
-    /**
-     * Millimetre distances represented by the four caliper handles. Handles
-     * are transformed through the card homography first, so perspective tilt
-     * is removed before the Euclidean distance is measured.
-     *
-     * @return (widthMm, lengthMm)
-     */
-    fun caliperValues(
-        handles: CaliperHandles,
-        homography: DoubleArray,
-        imageW: Int,
-        imageH: Int,
-    ): Pair<Double, Double> {
-        val widthA = applyH(homography, normToPx(handles.widthA, imageW, imageH))
-        val widthB = applyH(homography, normToPx(handles.widthB, imageW, imageH))
-        val lengthA = applyH(homography, normToPx(handles.lengthA, imageW, imageH))
-        val lengthB = applyH(homography, normToPx(handles.lengthB, imageW, imageH))
-        return distance(widthA, widthB) to distance(lengthA, lengthB)
-    }
-
-    /**
-     * Move the two width handles symmetrically by [deltaMm] on the metric card
-     * plane. Keeping ±0.1 mm nudges physically meaningful even with tilt.
-     */
-    fun nudgeWidth(
-        handles: CaliperHandles,
-        deltaMm: Double,
-        homography: DoubleArray,
-        inverseHomography: DoubleArray,
-        imageW: Int,
-        imageH: Int,
-        minMm: Double,
-    ): CaliperHandles = nudgePair(
-        handles, handles.widthA, handles.widthB, deltaMm,
-        homography, inverseHomography, imageW, imageH, minMm,
-    ) { current, a, b -> current.copy(widthA = a, widthB = b) }
-
-    /** Move the two length handles symmetrically by [deltaMm]. */
-    fun nudgeLength(
-        handles: CaliperHandles,
-        deltaMm: Double,
-        homography: DoubleArray,
-        inverseHomography: DoubleArray,
-        imageW: Int,
-        imageH: Int,
-        minMm: Double,
-    ): CaliperHandles = nudgePair(
-        handles, handles.lengthA, handles.lengthB, deltaMm,
-        homography, inverseHomography, imageW, imageH, minMm,
-    ) { current, a, b -> current.copy(lengthA = a, lengthB = b) }
-
-    private inline fun nudgePair(
-        handles: CaliperHandles,
-        first: NormPt,
-        second: NormPt,
-        deltaMm: Double,
-        homography: DoubleArray,
-        inverseHomography: DoubleArray,
-        imageW: Int,
-        imageH: Int,
-        minMm: Double,
-        rebuild: (CaliperHandles, NormPt, NormPt) -> CaliperHandles,
-    ): CaliperHandles {
-        val a = applyH(homography, normToPx(first, imageW, imageH))
-        val b = applyH(homography, normToPx(second, imageW, imageH))
-        val lengthMm = distance(a, b)
-        if (lengthMm < 1e-6) return handles
-
-        val targetLength = maxOf(minMm, lengthMm + deltaMm)
-        val center = Pt((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
-        val direction = Pt((b.x - a.x) / lengthMm, (b.y - a.y) / lengthMm)
-
-        val nextA = Pt(
-            center.x - direction.x * targetLength / 2.0,
-            center.y - direction.y * targetLength / 2.0,
-        )
-        val nextB = Pt(
-            center.x + direction.x * targetLength / 2.0,
-            center.y + direction.y * targetLength / 2.0,
-        )
-
-        val normA = clampNorm(pxToNorm(applyH(inverseHomography, nextA), imageW, imageH))
-        val normB = clampNorm(pxToNorm(applyH(inverseHomography, nextB), imageW, imageH))
-        return rebuild(handles, normA, normB)
-    }
-
-    /** Unit major/minor vectors for an axis angle (radians). */
-    fun axisVectors(angleRad: Double): Pair<Pt, Pt> {
-        val major = Pt(cos(angleRad), sin(angleRad))
-        val minor = Pt(-major.y, major.x)
-        return major to minor
-    }
+    fun clamp(value: Double, minimum: Double, maximum: Double): Double =
+        max(minimum, min(maximum, value))
 }
