@@ -19,8 +19,8 @@ object AppConfig {
     object Detection {
         /** Working width for the ~6-8 fps preview detector. */
         const val WORKING_WIDTH_PX = 720
-        /** Minimum time between analysed preview frames (~7 fps). */
-        const val FRAME_INTERVAL_MS = 140L
+        /** Minimum time between analysed preview frames (~6 fps). */
+        const val FRAME_INTERVAL_MS = 160L
         /** Consecutive valid frames required before the still capture fires. */
         const val REQUIRED_CONSECUTIVE_FRAMES = 5
         /** Reject non-90-degree corners beyond this in the live tracker. */

@@ -23,7 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
-import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material3.AlertDialog
@@ -357,7 +357,7 @@ private fun Thumbnail(path: String) {
                 modifier = Modifier.fillMaxSize(),
             )
         } ?: Icon(
-            imageVector = Icons.Filled.Build,
+            imageVector = Icons.Filled.CropFree,
             contentDescription = null,
             tint = WorkshopPalette.TextFaint,
             modifier = Modifier.size(24.dp),
@@ -382,7 +382,7 @@ private fun EmptyScans() {
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(
-                    imageVector = Icons.Filled.Build,
+                    imageVector = Icons.Filled.CropFree,
                     contentDescription = null,
                     tint = WorkshopPalette.Amber,
                     modifier = Modifier.size(40.dp),

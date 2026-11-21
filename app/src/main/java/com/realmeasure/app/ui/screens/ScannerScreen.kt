@@ -44,9 +44,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -432,35 +433,42 @@ private fun CameraStage(
     LaunchedEffect(scanState, camera) {
         if (scanState !is ScanUiState.Analyzing || camera == null) return@LaunchedEffect
         if (!capturing.compareAndSet(false, true)) return@LaunchedEffect
-        imageCapture.takePicture(
-            captureExecutor,
-            object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    try {
-                        val bitmap = image.toUprightBitmap()
-                        if (bitmap != null) {
-                            latestOnStill.value(bitmap)
-                        } else {
-                            latestOnCaptureFailed.value("Could not decode the captured photo.")
+        try {
+            imageCapture.takePicture(
+                captureExecutor,
+                object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: ImageProxy) {
+                        try {
+                            val bitmap = image.toUprightBitmap()
+                            if (bitmap != null) {
+                                latestOnStill.value(bitmap)
+                            } else {
+                                latestOnCaptureFailed.value("Could not decode the captured photo.")
+                            }
+                        } catch (throwable: Throwable) {
+                            latestOnCaptureFailed.value(
+                                throwable.message ?: "Could not decode the captured photo.",
+                            )
+                        } finally {
+                            image.close()
+                            capturing.set(false)
                         }
-                    } catch (throwable: Throwable) {
-                        latestOnCaptureFailed.value(
-                            throwable.message ?: "Could not decode the captured photo.",
-                        )
-                    } finally {
-                        image.close()
-                        capturing.set(false)
                     }
-                }
 
-                override fun onError(exception: ImageCaptureException) {
-                    capturing.set(false)
-                    latestOnCaptureFailed.value(
-                        exception.message ?: "The camera could not take the still photo.",
-                    )
-                }
-            },
-        )
+                    override fun onError(exception: ImageCaptureException) {
+                        capturing.set(false)
+                        latestOnCaptureFailed.value(
+                            exception.message ?: "The camera could not take the still photo.",
+                        )
+                    }
+                },
+            )
+        } catch (throwable: Throwable) {
+            capturing.set(false)
+            latestOnCaptureFailed.value(
+                throwable.message ?: "The camera could not take the still photo.",
+            )
+        }
     }
 
     DisposableEffect(Unit) {
@@ -579,7 +587,7 @@ private fun CameraErrorOverlay(message: String, onRetry: () -> Unit) {
             modifier = Modifier.padding(24.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.Build,
+                imageVector = Icons.Filled.Warning,
                 contentDescription = null,
                 tint = WorkshopPalette.Amber,
                 modifier = Modifier.size(32.dp),
@@ -629,7 +637,7 @@ private fun PermissionRationale(onRequest: () -> Unit, onOpenSettings: () -> Uni
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(
-            imageVector = Icons.Filled.Build,
+            imageVector = Icons.Filled.PhotoCamera,
             contentDescription = null,
             tint = WorkshopPalette.Amber,
             modifier = Modifier.size(44.dp),
