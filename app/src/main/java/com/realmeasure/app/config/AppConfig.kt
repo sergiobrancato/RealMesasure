@@ -33,8 +33,6 @@ object AppConfig {
         /** Stage aspect (width / height). The captured bitmap is centre-cropped
          *  to this ratio so normalised guide coordinates map 1:1. */
         const val STAGE_ASPECT = 3.0 / 4.0
-        /** Analysis bitmap width cap (px). */
-        const val PROCESSING_MAX_WIDTH_PX = 1200
     }
 
     // ------------------------------------------------------------------
@@ -60,8 +58,13 @@ object AppConfig {
     // ------------------------------------------------------------------
     object CardCv {
         const val GAUSSIAN_KERNEL = 5
-        const val CANNY_LOW = 45.0
-        const val CANNY_HIGH = 140.0
+        const val CANNY_LOW = 30.0
+        const val CANNY_HIGH = 90.0
+        /** CLAHE settings that lift low-contrast card edges off a light desk. */
+        const val CLAHE_CLIP_LIMIT = 2.0
+        const val CLAHE_TILE_GRID = 8.0
+        /** Larger close kernel bridges gaps in the Canny card outline. */
+        const val EDGE_CLOSE_KERNEL = 9
         const val ADAPTIVE_BLOCK = 31
         const val ADAPTIVE_C = 7.0
         /** approxPolyDP epsilon as a fraction of contour perimeter. */
@@ -89,6 +92,10 @@ object AppConfig {
         const val ADAPTIVE_BLOCK = 31
         const val ADAPTIVE_C = 5.0
         const val MORPH_KERNEL = 3
+        /** Minimum long/short ratio for a live fastener contour. */
+        const val MIN_ELONGATION = 1.6
+        /** Short side floor in the downscaled detector (px). */
+        const val MIN_SHORT_SIDE_PX = 5.0
         /** Contour must exceed this area (mm^2) after metric rectification. */
         const val MIN_AREA_MM2 = 1.6
         /** A head is a run at one end wider than shaftWidth * this ratio. */
@@ -126,15 +133,30 @@ object AppConfig {
     }
 
     // ------------------------------------------------------------------
-    // Interactive caliper
+    // Hands-free live scanning
     // ------------------------------------------------------------------
-    object Caliper {
-        /** Fine-adjust increment (mm). */
-        const val STEP_MM = 0.1
-        const val MIN_WIDTH_MM = 0.2
-        const val MIN_LENGTH_MM = 0.2
-        /** Drag hit radius for caliper handles (dp). */
-        const val TOUCH_RADIUS_DP = 28
+    object Live {
+        /** Downscaled width used by the per-frame detector (px). */
+        const val DETECT_WIDTH_PX = 640
+        /** CameraX ImageAnalysis target resolution (4:3, rotated to 3:4). */
+        const val ANALYSIS_WIDTH_PX = 1024
+        const val ANALYSIS_HEIGHT_PX = 768
+        /** Minimum time between analysed frames - ~6-7 fps keeps the UI smooth. */
+        const val FRAME_INTERVAL_MS = 150L
+        /** Consecutive valid frames required before auto-capture (~750 ms). */
+        const val REQUIRED_CONSECUTIVE_FRAMES = 5
+        /** Mean grey value below which the scene is considered dark. */
+        const val LOW_LIGHT_MEAN = 48.0
+        /** Minimum contour area as a fraction of the target-zone search crop. */
+        const val PART_MIN_AREA_RATIO = 0.012
+        /** Minimum contour fill ratio (area / bounding rectangle). */
+        const val PART_MIN_FILL_RATIO = 0.18
+        /** Smallest physically plausible diameter for auto-capture (mm). */
+        const val MIN_FASTENER_DIAMETER_MM = 1.5
+        /** Safety margin (fraction of the guide width) before "touches the frame". */
+        const val PART_EDGE_MARGIN_RATIO = 0.03
+        /** Maximum width of the bitmap handed to the full measurement pipeline. */
+        const val MEASURE_MAX_WIDTH_PX = 1024
     }
 }
 
@@ -157,5 +179,6 @@ object WorkshopPalette {
     val TextFaint = Color(0xFF64748B)
     val Border = Color(0xFF263041)
     val Success = Color(0xFF34D399)
+    val Emerald = Color(0xFF22C55E)
     val Danger = Color(0xFFFB7185)
 }

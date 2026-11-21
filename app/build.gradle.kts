@@ -69,9 +69,6 @@ dependencies {
     // initialises it with OpenCVLoader.initLocal() in RealMeasureApp.
     implementation("org.opencv:opencv:4.10.0")
 
-    // JPEG EXIF rotation for captured photos.
-    implementation("androidx.exifinterface:exifinterface:1.3.7")
-
     // JVM unit tests (StandardMatcherTest).
     testImplementation("junit:junit:4.13.2")
 }

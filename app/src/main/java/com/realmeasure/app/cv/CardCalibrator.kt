@@ -99,16 +99,39 @@ object CardCalibrator {
             Imgproc.morphologyEx(adaptiveMask, adaptiveClosed, Imgproc.MORPH_CLOSE, kernel)
 
             val edges = Mat().tracked()
-            Imgproc.Canny(blurred, edges, cv.CANNY_LOW, cv.CANNY_HIGH)
+            val enhanced = Mat().tracked()
+            val clahe = Imgproc.createCLAHE(
+                cv.CLAHE_CLIP_LIMIT,
+                Size(cv.CLAHE_TILE_GRID, cv.CLAHE_TILE_GRID),
+            )
+            clahe.apply(blurred, enhanced)
+            clahe.collectGarbage()
+            Imgproc.Canny(enhanced, edges, cv.CANNY_LOW, cv.CANNY_HIGH)
+            val edgeKernel = Imgproc.getStructuringElement(
+                Imgproc.MORPH_RECT,
+                Size(cv.EDGE_CLOSE_KERNEL.toDouble(), cv.EDGE_CLOSE_KERNEL.toDouble()),
+            ).tracked()
             val edgesClosed = Mat().tracked()
-            Imgproc.morphologyEx(edges, edgesClosed, Imgproc.MORPH_CLOSE, kernel)
+            Imgproc.morphologyEx(edges, edgesClosed, Imgproc.MORPH_CLOSE, edgeKernel)
 
             // ---- Best four-corner candidate --------------------------------
             val candidates = listOfNotNull(
                 evaluateMask(adaptiveClosed, searchRect.width, searchRect.height),
                 evaluateMask(edgesClosed, searchRect.width, searchRect.height),
             )
-            val best = candidates.maxByOrNull { it.score }
+
+            // The edge-profile detector is far more reliable on low-contrast
+            // cards (white ID-1 on a white desk), so prefer it and keep the
+            // contour search as a fallback for high-contrast dark cards.
+            val edgeDetection = CardEdgeDetector.detect(
+                search = search,
+                guideLeft = guides.CARD_X * gray.cols() - searchRect.x,
+                guideTop = guides.CARD_Y * gray.rows() - searchRect.y,
+                guideWidth = guides.CARD_W * gray.cols(),
+                guideHeight = guides.CARD_H * gray.rows(),
+            )
+            val best = edgeDetection?.let { QuadCandidate(it.quad, it.score) }
+                ?: candidates.maxByOrNull { it.score }
                 ?: throw CalibrationException(
                     "CARD_NOT_FOUND",
                     "The bank/ID card was not found inside the amber guide.",
@@ -227,43 +250,48 @@ object CardCalibrator {
                 val coverage = area / roiArea
                 if (coverage < cv.MIN_AREA_RATIO || coverage > cv.MAX_AREA_RATIO) continue
 
-                val perimeter = Imgproc.arcLength(MatOfPoint2f(*contour.toArray()), true)
-                if (perimeter < 80.0) continue
-
-                val approx = MatOfPoint2f()
+                val contour2f = MatOfPoint2f(*contour.toArray())
                 try {
-                    Imgproc.approxPolyDP(
-                        MatOfPoint2f(*contour.toArray()),
-                        approx,
-                        perimeter * cv.APPROX_EPSILON_RATIO,
-                        true,
-                    )
-                    val points = approx.toArray().map { it.toPt() }
-                    if (points.size != 4) continue
+                    val perimeter = Imgproc.arcLength(contour2f, true)
+                    if (perimeter < 80.0) continue
 
-                    val quad = Geometry.orderQuad(points)
-                    val (quadWidth, quadHeight) = Geometry.quadSides(quad)
-                    if (quadWidth < 20.0 || quadHeight < 20.0) continue
+                    val approx = MatOfPoint2f()
+                    try {
+                        Imgproc.approxPolyDP(
+                            contour2f,
+                            approx,
+                            perimeter * cv.APPROX_EPSILON_RATIO,
+                            true,
+                        )
+                        val points = approx.toArray().map { it.toPt() }
+                        if (points.size != 4) continue
 
-                    val aspect = max(quadWidth, quadHeight) / min(quadWidth, quadHeight)
-                    val aspectError = abs(aspect - cardAspect) / cardAspect
-                    if (aspectError > cv.MAX_ASPECT_ERROR) continue
+                        val quad = Geometry.orderQuad(points)
+                        val (quadWidth, quadHeight) = Geometry.quadSides(quad)
+                        if (quadWidth < 20.0 || quadHeight < 20.0) continue
 
-                    val quadCenter = Pt(
-                        points.sumOf { it.x } / 4.0,
-                        points.sumOf { it.y } / 4.0,
-                    )
-                    val centerDistance = Geometry.distance(quadCenter, center) / halfDiagonal
-                    val aspectScore = 1.0 - (aspectError / cv.MAX_ASPECT_ERROR).coerceIn(0.0, 1.0)
-                    val areaScore = (coverage / 0.55).coerceIn(0.0, 1.0)
-                    val centerScore = 1.0 - centerDistance.coerceIn(0.0, 1.0)
-                    val score = 0.50 * aspectScore + 0.35 * areaScore + 0.15 * centerScore
+                        val aspect = max(quadWidth, quadHeight) / min(quadWidth, quadHeight)
+                        val aspectError = abs(aspect - cardAspect) / cardAspect
+                        if (aspectError > cv.MAX_ASPECT_ERROR) continue
 
-                    if (best == null || score > best!!.score) {
-                        best = QuadCandidate(points, score)
+                        val quadCenter = Pt(
+                            points.sumOf { it.x } / 4.0,
+                            points.sumOf { it.y } / 4.0,
+                        )
+                        val centerDistance = Geometry.distance(quadCenter, center) / halfDiagonal
+                        val aspectScore = 1.0 - (aspectError / cv.MAX_ASPECT_ERROR).coerceIn(0.0, 1.0)
+                        val areaScore = (coverage / 0.55).coerceIn(0.0, 1.0)
+                        val centerScore = 1.0 - centerDistance.coerceIn(0.0, 1.0)
+                        val score = 0.50 * aspectScore + 0.35 * areaScore + 0.15 * centerScore
+
+                        if (best == null || score > best!!.score) {
+                            best = QuadCandidate(points, score)
+                        }
+                    } finally {
+                        approx.release()
                     }
                 } finally {
-                    approx.release()
+                    contour2f.release()
                 }
             }
         } finally {

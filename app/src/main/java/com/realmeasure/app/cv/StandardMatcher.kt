@@ -19,12 +19,30 @@ import com.realmeasure.app.model.ThreadOption
 import kotlin.math.abs
 
 /**
+ * Snapped identification result used by the hands-free scanner modal and the
+ * stored history. Mirrors the reference API that ships with the project.
+ */
+data class FastenerSpecResult(
+    /** Bold headline, e.g. "M4 x 16 mm" or "3 mm Hex Key". */
+    val primaryLabel: String,
+    /** Runner-up family suggestion, e.g. "Alt (Imperial): #8-32 (4.17 mm)". */
+    val secondaryAlternative: String?,
+    /** Coarse/fine or UNC/UNF pitch summary. */
+    val pitchInfo: String?,
+    val rawDiameterMm: Float,
+    val rawLengthMm: Float?,
+    /** Distance from the measured diameter to the winning nominal size. */
+    val diameterErrorMm: Float,
+)
+
+/**
  * Pure catalogue matcher: given a measured diameter (and optional length) it
  * identifies the closest ISO metric and UNC/UNF imperial sizes with deviation
  * deltas, thread options and standard-length guidance.
  *
- * The scanner, the interactive caliper and the JVM unit tests all call exactly
- * the same function.
+ * The scanner, the result modal and the JVM unit tests all call exactly the
+ * same functions. [matchScrewOrBolt] / [matchHexKey] are the reference-facing
+ * API used by the live pipeline; [match] exposes the full ranked catalogue.
  */
 object StandardMatcher {
 
@@ -63,6 +81,124 @@ object StandardMatcher {
             imperial = imperial,
             alternatives = alternatives,
             withinTolerance = (metric?.inTolerance == true) || (imperial?.inTolerance == true),
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // Reference API used by the live auto-scan pipeline
+    // -----------------------------------------------------------------
+
+    /**
+     * Snap a screw/bolt measurement to the closest Metric or Imperial thread
+     * size and a standard length.
+     *
+     * @param maxDiameterToleranceMm values beyond this fall back to a
+     *   "Custom" label (the ViewModel turns that into a Scan Failed modal).
+     */
+    fun matchScrewOrBolt(
+        measuredDiameterMm: Float,
+        measuredLengthMm: Float,
+        maxDiameterToleranceMm: Float = 0.45f,
+    ): FastenerSpecResult {
+        val rich = match(
+            HardwareKind.FASTENER,
+            measuredDiameterMm.toDouble(),
+            measuredLengthMm.toDouble(),
+        )
+        val metric = rich.metric
+        val imperial = rich.imperial
+        val useMetric = metric != null && (imperial == null || abs(metric.deltaMm) <= abs(imperial.deltaMm))
+        val winner = if (useMetric) metric else imperial
+        val runnerUp = if (useMetric) imperial else metric
+
+        if (winner == null) {
+            return FastenerSpecResult(
+                primaryLabel = String.format(java.util.Locale.US, "Custom (%.2f x %.1f mm)", measuredDiameterMm, measuredLengthMm),
+                secondaryAlternative = null,
+                pitchInfo = null,
+                rawDiameterMm = measuredDiameterMm,
+                rawLengthMm = measuredLengthMm,
+                diameterErrorMm = Float.MAX_VALUE,
+            )
+        }
+
+        val errorMm = abs(winner.deltaMm).toFloat()
+        val snappedLengthMm = winner.recommendedLengthMm
+        val snappedLengthIn = winner.recommendedLengthIn
+        val label = if (errorMm > maxDiameterToleranceMm) {
+            String.format(java.util.Locale.US, "Custom (%.2f x %.1f mm)", measuredDiameterMm, measuredLengthMm)
+        } else if (useMetric) {
+            val length = snappedLengthMm?.toInt() ?: measuredLengthMm.toInt()
+            "${winner.designation} x $length mm"
+        } else {
+            val lengthIn = snappedLengthIn ?: (measuredLengthMm / AppConfig.MM_PER_INCH).toFloat()
+            String.format(java.util.Locale.US, "%s x %.2f\"", winner.designation, lengthIn)
+        }
+
+        val secondary = runnerUp?.let {
+            val nominal = if (it.family == HardwareFamily.METRIC) {
+                String.format(java.util.Locale.US, "%.2f mm", it.nominalMm)
+            } else {
+                String.format(java.util.Locale.US, "%.2f mm", it.nominalMm)
+            }
+            "Alt (${if (it.family == HardwareFamily.METRIC) "Metric" else "Imperial"}): ${it.designation} ($nominal)"
+        }
+
+        val pitch = winner.threadOptions.joinToString(" | ") { it.label }.ifBlank { null }
+
+        return FastenerSpecResult(
+            primaryLabel = label,
+            secondaryAlternative = secondary,
+            pitchInfo = pitch,
+            rawDiameterMm = measuredDiameterMm,
+            rawLengthMm = measuredLengthMm,
+            diameterErrorMm = errorMm,
+        )
+    }
+
+    /**
+     * Snap an across-flats hex-key measurement to the closest Metric or SAE
+     * size.
+     */
+    fun matchHexKey(
+        measuredWidthMm: Float,
+        maxToleranceMm: Float = 0.35f,
+    ): FastenerSpecResult {
+        val rich = match(HardwareKind.HEX_KEY, measuredWidthMm.toDouble(), null)
+        val metric = rich.metric
+        val imperial = rich.imperial
+        val useMetric = metric != null && (imperial == null || abs(metric.deltaMm) <= abs(imperial.deltaMm))
+        val winner = if (useMetric) metric else imperial
+        val runnerUp = if (useMetric) imperial else metric
+
+        if (winner == null) {
+            return FastenerSpecResult(
+                primaryLabel = String.format(java.util.Locale.US, "Custom Hex (%.2f mm)", measuredWidthMm),
+                secondaryAlternative = null,
+                pitchInfo = null,
+                rawDiameterMm = measuredWidthMm,
+                rawLengthMm = null,
+                diameterErrorMm = Float.MAX_VALUE,
+            )
+        }
+
+        val errorMm = abs(winner.deltaMm).toFloat()
+        val label = if (errorMm > maxToleranceMm) {
+            String.format(java.util.Locale.US, "Custom Hex (%.2f mm)", measuredWidthMm)
+        } else {
+            "${winner.designation} Hex Key"
+        }
+        val secondary = runnerUp?.let {
+            "Alt (${if (it.family == HardwareFamily.METRIC) "Metric" else "SAE"}): ${it.designation} (${String.format(java.util.Locale.US, "%.2f mm", it.nominalMm)})"
+        }
+
+        return FastenerSpecResult(
+            primaryLabel = label,
+            secondaryAlternative = secondary,
+            pitchInfo = null,
+            rawDiameterMm = measuredWidthMm,
+            rawLengthMm = null,
+            diameterErrorMm = errorMm,
         )
     }
 

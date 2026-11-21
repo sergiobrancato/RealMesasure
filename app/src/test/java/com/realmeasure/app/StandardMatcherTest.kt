@@ -133,4 +133,40 @@ class StandardMatcherTest {
         assertFalse(result.withinTolerance)
         assertEquals(0, result.alternatives.size)
     }
+
+    // ------------------------------------------------------------------
+    // Reference API used by the hands-free scanner
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `screw reference API snaps M4 diameter and standard length`() {
+        val spec = StandardMatcher.matchScrewOrBolt(4.02f, 15.6f)
+        assertEquals("M4 x 16 mm", spec.primaryLabel)
+        assertEquals(4.02f, spec.rawDiameterMm, 1e-6f)
+        assertEquals(15.6f, spec.rawLengthMm!!, 1e-6f)
+        assertTrue(spec.diameterErrorMm < 0.45f)
+        assertNotNull(spec.secondaryAlternative)
+        assertNotNull(spec.pitchInfo)
+    }
+
+    @Test
+    fun `screw reference API falls back to custom outside tolerance`() {
+        val spec = StandardMatcher.matchScrewOrBolt(4.02f, 15.6f, maxDiameterToleranceMm = 0.001f)
+        assertTrue(spec.primaryLabel.startsWith("Custom"))
+        assertTrue(spec.diameterErrorMm < 0.45f)
+    }
+
+    @Test
+    fun `hex key reference API snaps across-flats width`() {
+        val spec = StandardMatcher.matchHexKey(3.01f)
+        assertEquals("3 mm Hex Key", spec.primaryLabel)
+        assertEquals(3.01f, spec.rawDiameterMm, 1e-6f)
+        assertTrue(spec.rawLengthMm == null)
+    }
+
+    @Test
+    fun `hex key reference API falls back to custom outside tolerance`() {
+        val spec = StandardMatcher.matchHexKey(3.01f, maxToleranceMm = 0.001f)
+        assertTrue(spec.primaryLabel.startsWith("Custom Hex"))
+    }
 }
