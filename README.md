@@ -21,8 +21,8 @@ RealMeasure turns a phone into a flatbed metrology scanner:
 
 1. Lay a known **ISO reference** flat beside an object — either an **ID-1 bank/ID card** (`85.60 × 53.98 mm`) for small parts or an **A4 sheet** (`297 × 210 mm`) for large objects.
 2. Point the rear camera at the scene. A live detector tracks the reference quadrilateral, rejects excessive tilt and advances a stability ring.
-3. After five stable frames the app **automatically** captures a full-resolution still (`CAPTURE_MODE_MAXIMIZE_QUALITY`). No shutter button.
-4. `cornerSubPix` refines the four reference corners on the full-resolution grayscale, a planar homography flattens the entire scene at a uniform **px/mm** scale, and OpenCV traces every outer contour and internal hole.
+3. After five stable frames the app **automatically** captures a full-resolution still (`CAPTURE_MODE_MAXIMIZE_QUALITY`). No shutter button. The still is sampled down to a 2048 px processing edge before OpenCV.
+4. `cornerSubPix` refines the four reference corners on the ≤2048 px processing grayscale, a planar homography flattens the entire scene at a uniform **px/mm** scale, and OpenCV traces every outer contour and verified hole.
 5. The app reports the **2D planar footprint** — net surface area, exact outline perimeter, minimum bounding box, hole diameters and centre-to-centre spacings — each with a physics-based **`± mm` / `± cm²`** uncertainty.
 6. Drag two precision pins (with a 36 dp finger offset, a 3× loupe and 0.1 mm fine-tune arrows) anywhere on the flattened image to measure a custom point-to-point distance. Tap any object to select it.
 7. For containers and tall parts, an optional **3D height parallax slider** (0–150 mm) applies `k = 1 − h / 400 mm` to the reported linear dimensions and `k²` to the area in real time.
@@ -98,11 +98,11 @@ A still is rejected when
 \max_i\left|\theta_i-90^\circ\right| > 22^\circ.
 \]
 
-The live tracker uses a stricter **12°** gate to guide the user before the capture, so the full-resolution still almost always passes the 22° gate.
+The live tracker uses a stricter **12°** gate to guide the user before the capture, so the captured still almost always passes the 22° gate.
 
 ### 3. Sub-pixel corner refinement
 
-The reference is first found in a downscaled copy of the still (fast), then its corners are scaled to the full-resolution grayscale and refined with:
+The reference is first found in a downscaled copy of the still (fast), then its corners are scaled to the ≤2048 px processing grayscale and refined with:
 
 ```text
 cv::cornerSubPix(
@@ -171,7 +171,7 @@ W_c=\left\lceil x_{\max}-x_{\min}\right\rceil,\qquad
 H_c=\left\lceil y_{\max}-y_{\min}\right\rceil.
 \]
 
-If \(\max(W_c,H_c)>4096\), a uniform scale \(f=4096/\max(W_c,H_c)\) is folded into the homography:
+If \(\max(W_c,H_c)>2400\), a uniform scale \(f=2400/\max(W_c,H_c)\) is folded into the homography:
 
 \[
 H = S(f)\cdot T\cdot H_0,\qquad
@@ -182,43 +182,62 @@ The effective scale becomes \(s_{\text{eff}}=f\,s\). The full image is warped wi
 
 > The translation is the difference between a “card crop” and a **scene scanner**. It preserves the object even when it is far from the reference.
 
-### 7. Irregular object geometry
+### 7. Irregular object geometry (solid silhouette, not edge rings)
 
-The flattened grayscale image is analysed with adaptive thresholding in **both polarities** (light object on dark mat, dark object on light mat) plus a Canny-outline fallback. The reference rectangle is erased first. Contours are extracted with:
+The flattened image is converted to **Lab** colour space. A background colour is estimated from the mat around the border (the reference rectangle is excluded), and the object is seeded from:
 
-```text
-cv::findContours(mask, contours, hierarchy,
-                 RETR_TREE, CHAIN_APPROX_SIMPLE)
-```
+- the **Lab distance from the background** (`max(|ΔL|, |Δa|, |Δb|)`), which handles light, dark and coloured cases;
+- **L-channel and colour-gradient Canny edges**, which close low-contrast white-on-white outlines;
+- an **L adaptive-threshold fallback** for the hardest low-contrast silhouettes.
 
-Only top-level contours are object candidates; their direct children are holes. Objects touching the canvas border are rejected as incomplete.
+Each seed is closed and its external contours are found with `RETR_EXTERNAL`. A raw Canny ring is **never measured directly**: a thick edge ring has two boundaries and gives a roughly doubled perimeter and misleading area. For every candidate the app:
+
+1. fills the outer contour into a **solid binary mask**:
+   ```text
+   cv::drawContours(solidMask, contours, 0, Scalar(255), -1)
+   ```
+2. re-extracts the clean outer boundary from that solid mask (`RETR_EXTERNAL`);
+3. measures the bounding box, perimeter and gross area from the **filled silhouette**.
+
+Holes are then accepted only when all of the following hold:
+
+- the region is inside the **eroded solid object**, so it cannot be part of the outside background;
+- its Lab colour and luminance match the mat within the configured tolerances, i.e. it is a true background pass-through;
+- its area is **≥ 2.5 mm²**;
+- its circularity \(4\pi A/P^2\) is **≥ 0.45**.
+
+The object mean colour contrast must also be high enough for background-like regions to be meaningful. This rejects printed text, small specular highlights and most surface graphics; those are not subtracted from the net area.
+
+A user can additionally draw a box and run **GrabCut** (`GC_INIT_WITH_RECT`, three iterations) to snap the silhouette tightly to a difficult object; that path uses the same solid-fill geometry and strict hole filters, and immediately recalculates the bounding box, 2D planar area and perimeter.
+
+Only top-level contours are object candidates. Objects touching the canvas border are rejected as incomplete.
 
 For each accepted object:
 
-**Rotated bounding box** via `minAreaRect`:
+**Rotated bounding box** via `minAreaRect` on the clean filled silhouette:
 
 \[
 L_{\text{mm}}=\frac{\max(w_{\text{px}},h_{\text{px}})}{s},\qquad
 W_{\text{mm}}=\frac{\min(w_{\text{px}},h_{\text{px}})}{s}.
 \]
 
-**Exact perimeter**:
+**Exact outline perimeter** from the clean solid boundary:
 
 \[
-P_{\text{mm}}=\frac{\operatorname{arcLength}(C_{\text{outer}},\text{closed})}{s}.
+P_{\text{mm}}=\frac{\operatorname{arcLength}(C_{\text{outer,solid}},\text{closed})}{s}.
 \]
 
-**Net surface area** — a discrete Green’s theorem / shoelace computation. The signed shoelace sum
+**Net surface area** — the gross area comes from the solid filled silhouette, then verified holes are subtracted. The shoelace/Green’s theorem sum
 
 \[
 A(C)=\frac12\left|\sum_i (x_i y_{i+1}-x_{i+1}y_i)\right|
 \]
 
-is evaluated on the outer contour and every hole, and the holes are subtracted:
+is evaluated on the solid outer contour and every hole:
 
 \[
 A_{\text{net,mm}^2}
-=\frac{\operatorname{contourArea}(C_{\text{outer}})
+=\frac{\operatorname{contourArea}(C_{\text{outer,solid}})
 -\sum_{k=1}^{n}\operatorname{contourArea}(C_{\text{hole},k})}{s^2},
 \qquad
 A_{\text{net,cm}^2}=\frac{A_{\text{net,mm}^2}}{100}.
@@ -471,9 +490,9 @@ RealMeasure/
 │  │  └─ AnalysisModels.kt              # ObjectGeometry, HoleGeometry, HoleSpacing
 │  ├─ cv/
 │  │  ├─ ReferenceDetector.kt           # live + still 4-vertex ID/A4 finder
-│  │  ├─ PrecisionCalibrator.kt         # cornerSubPix, tilt gate, H = S·T·H0, warp
-│  │  ├─ IrregularShapeAnalyzer.kt      # contours, holes, areas, moments, uncertainty
-│  │  ├─ ErrorEstimator.kt              # Δpx, ε_cal, δL, δA, quality badge
+│  │  ├─ PrecisionCalibrator.kt         # 2048 px source cap, cornerSubPix, warp ≤2400
+│  │  ├─ IrregularShapeAnalyzer.kt      # Lab/edge seeds, solid silhouette, strict holes, GrabCut
+│  │  ├─ ErrorEstimator.kt              # Δpx, ε_cal, δL, δA, parallax, quality badge
 │  │  ├─ AnalysisRenderer.kt            # annotated history thumbnail
 │  │  ├─ Geometry.kt                    # pure ordering/tilt/homography/polygon math
 │  │  └─ MatPool.kt                     # deterministic OpenCV Mat release
@@ -486,18 +505,18 @@ RealMeasure/
 │  │  └─ AppPreferences.kt              # "Don't show again"
 │  ├─ ui/
 │  │  ├─ RealMeasureApp.kt              # bottom nav + onboarding gate
-│  │  ├─ ScannerViewModel.kt            # tokenized ScanUiState + Default-dispatcher pipeline
+│  │  ├─ ScannerViewModel.kt            # tokenized state, cooldown, bitmap recycling, watchdog
 │  │  ├─ ScansViewModel.kt              # My Scans save/delete/refresh
 │  │  ├─ Formats.kt                     # ± mm / ± cm² / ± mm² formatting
 │  │  ├─ components/
 │  │  │  ├─ Controls.kt                 # segmented reference selector, badges, actions
 │  │  │  ├─ ScannerOverlay.kt           # emerald tracking polygon + stability ring
-│  │  │  ├─ InteractiveCaliper.kt       # normalized two-pin caliper, loupe, 0.1 mm nudge
+│  │  │  ├─ InteractiveCaliper.kt       # normalized pins, loupe, 0.1 mm nudge, GrabCut box
 │  │  │  ├─ OnboardingModal.kt          # Canvas diagram of the selected reference
 │  │  │  └─ ErrorModal.kt               # reason + Try Again
 │  │  └─ screens/
-│  │     ├─ ScannerScreen.kt            # CameraX Preview + ImageAnalysis + ImageCapture
-│  │     ├─ ResultScreen.kt             # 2D hero metrics, height parallax, save, SVG
+│  │     ├─ ScannerScreen.kt            # CameraX + guarded torch + ImageCapture
+│  │     ├─ ResultScreen.kt             # 2D hero, height presets, refine, save, SVG
 │  │     └─ ScansScreen.kt              # history cards, re-export, delete
 │  └─ res/xml/file_paths.xml            # FileProvider exports/ + scans/
 └─ app/src/test/java/com/realmeasure/app/
@@ -512,13 +531,20 @@ RealMeasure/
 Scanning(referenceDetected, guidanceMessage, stabilityProgress, referenceQuad, tiltDeg)
    │  5 stable preview frames
    ▼
-Analyzing(token) ── full-resolution still ──► Success(ScanAnalysis)
+Analyzing(token) ── captured still (≤2048 px) ──► Success(ScanAnalysis)
    │                                              │
    ├── calibration / contour failure ──► Error(title, reason) ── Try Again ──► Scanning
    └── 6 s watchdog (capture or OpenCV stall) ──► Error("Scan Timed Out", ...)
 ```
 
-Every `ImageAnalysis` frame runs inside `imageProxy.use { ... }` and an `AtomicBoolean` guard, so a proxy is never leaked. Preview conversion, still decoding, `warpPerspective`, `findContours`, `moments` and all contour maths run on background dispatchers (`Dispatchers.Default` for the ViewModel pipeline), never on the main thread. Every temporary `Mat` is released through `MatPool`/`finally`. The tokenized `Analyzing` state plus a **6-second watchdog** guarantees a stale capture or a stalled native call cannot leave the UI on a spinner.
+Every `ImageAnalysis` frame runs inside `imageProxy.use { ... }` and an `AtomicBoolean` guard, so a proxy is never leaked. Preview conversion, still decoding, `warpPerspective`, `findContours`, `moments`, GrabCut and all contour maths run on background dispatchers (`Dispatchers.Default` for the ViewModel pipeline), never on the main thread. Every temporary `Mat` is released through `MatPool`/`finally`. The tokenized `Analyzing` state plus a **6-second watchdog** guarantees a stale capture or a stalled native call cannot leave the UI on a spinner.
+
+### Rapid-scan memory and torch safety
+
+- The captured still is downsampled so its longest side is **≤ 2048 px** before `Utils.bitmapToMat`; the homography output is capped at **2400 px**. All corner coordinates live in that scaled frame.
+- `Success` holds only the flattened display bitmap. Replaced bitmaps are explicitly recycled when returning to `Scanning`, overwriting a result, or clearing the ViewModel; the result dialog is disabled while saving or refining so the bitmap cannot be freed under an active operation.
+- A **500 ms cooldown** after `Success`/`Error` prevents the next frame from immediately re-triggering auto-capture.
+- The torch button is only exposed when `CameraInfo.hasFlashUnit()` is true; every `enableTorch` call is guarded and its future callback ignores `CameraControl.OperationCanceledException`. `ImageCapture.flashMode` is always `FLASH_MODE_OFF`, and the torch is disabled on ViewModel/result disposal and on `Success`, resetting `isTorchOn = false`.
 
 The preview pipeline is paused while `Analyzing`/`Success`/`Error` and while the onboarding modal is open. Switching to **My Scans** unbinds the camera entirely.
 
@@ -560,10 +586,12 @@ and uploads the debug APK.
 5. When the ring fills after five stable frames, the app captures automatically and flattens the scene.
 6. On the result screen:
    - the **2D Planar Footprint (from photo)** card shows area (`cm²` and `mm²`), perimeter, bounding box and hole count with `±` margins;
+   - **numbered H1/H2… markers** identify verified holes on the image; their coordinates, diameters and centre-to-centre spacings are listed in the **Geometry Detail** card below;
    - tap any detected object to select it;
    - **drag the P1/P2 grips** (36 dp below the crosshair tips) for a custom point-to-point distance with `± δD`; while dragging, a **3× loupe** shows the pixels under the active tip;
    - use the **Fine-Tune** bar's Pin 1/Pin 2 pills and **← ↑ ↓ →** arrows for exact **0.1 mm** nudges;
-   - optionally expand **3D Object Height (Parallax)**, set the height (`0–150 mm`) and watch the linear metrics scale by `k` and areas by `k²`;
+   - if the automatic silhouette is imperfect, tap **Refine Object (Draw Box)**, drag a rectangle around the object, and GrabCut snaps the contour and recalculates the bounding box, area and perimeter;
+   - use the quick **Flat 0 / 10 / 20 / 30 mm** chips (plus the `0–150 mm` fine slider) to apply the 3D parallax correction;
    - **Save to My Scans**, **Export 1:1 SVG**, or **Scan Another**.
 7. In **My Scans**, re-export the SVG or delete an entry (JPEG + JSON record are removed together).
 
@@ -588,7 +616,9 @@ and uploads the debug APK.
 - A single homography cannot model strong **lens distortion** (wide-angle phone lenses). The uncertainty model absorbs the residual into ε_cal, but a physically flatter lens (or a future calibration grid) improves accuracy.
 - Holes are reduced to an **equivalent-area diameter**. Slots and keyholes are correct in area, but their diameter is not a width measurement; use the two-pin caliper or the SVG for their exact profile.
 - Objects touching the flattened canvas border are rejected because their contour is incomplete.
-- SVG contours are simplified to **0.25 mm**; the reported perimeter/area are computed from the full-resolution contour.
+- The solid-silhouette pipeline detects light, dark and coloured objects, but low-contrast white-on-white objects rely on edges/GrabCut. Holes are only counted when they resemble the background, are ≥ 2.5 mm² and are reasonably circular; a shadowed slot or a non-circular opening may be omitted from the net area. Use **Refine Object (Draw Box)** for difficult silhouettes.
+- The still is capped at **2048 px** on its longest side and the flattened canvas at **2400 px** to keep repeated scans within the Android heap; this is well above the preview resolution and the measurement sampling needs.
+- SVG contours are simplified to **0.25 mm**; the reported perimeter/area are computed from the solid silhouette at the processing resolution (≤2048 px source, ≤2400 px canvas).
 - The current bundle targets Android; the computer-vision math is pure Kotlin/OpenCV and portable to a desktop JVM or iOS OpenCV build.
 
 ---

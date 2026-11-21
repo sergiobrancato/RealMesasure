@@ -24,10 +24,12 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -68,6 +70,7 @@ import com.realmeasure.app.model.ObjectGeometry
 import com.realmeasure.app.model.Pt
 import com.realmeasure.app.ui.Formats
 import com.realmeasure.app.ui.theme.Mono
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -94,6 +97,9 @@ fun InteractiveCaliper(
     pinDistanceMm: Double,
     pinErrorMm: Double,
     parallaxFactor: Double,
+    refineMode: Boolean,
+    refining: Boolean,
+    onRefineRect: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
 ) {
     val calibration = analysis.calibration
     val bitmap = calibration.warpedBitmap
@@ -106,6 +112,11 @@ fun InteractiveCaliper(
 
     var activePin by remember { mutableStateOf<Int?>(null) }
     var nudgeTarget by remember { mutableIntStateOf(1) }
+    var refineRect by remember { mutableStateOf<Rect?>(null) }
+
+    LaunchedEffect(refineMode) {
+        if (!refineMode) refineRect = null
+    }
 
     // The pointerInput coroutine is not restarted when the pins move; these
     // wrappers always expose the latest coordinates for hit testing.
@@ -123,14 +134,58 @@ fun InteractiveCaliper(
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(analysis, imageBitmap) {
+                    .pointerInput(analysis, imageBitmap, refineMode, refining, selectedIndex) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
+                            if (refining) {
+                                activePin = null
+                                return@awaitEachGesture
+                            }
                             val transform = viewTransform(
                                 Size(size.width.toFloat(), size.height.toFloat()),
                                 bitmap,
                                 pixelsPerMm,
                             )
+
+                            if (refineMode) {
+                                var current = down.position
+                                refineRect = Rect(
+                                    down.position.x,
+                                    down.position.y,
+                                    down.position.x,
+                                    down.position.y,
+                                )
+                                try {
+                                    drag(down.id) { change ->
+                                        current = change.position
+                                        refineRect = Rect(
+                                            down.position.x,
+                                            down.position.y,
+                                            current.x,
+                                            current.y,
+                                        )
+                                        change.consume()
+                                    }
+                                } finally {
+                                    val box = refineRect
+                                    refineRect = null
+                                    if (box != null &&
+                                        abs(box.width) >= 24.dp.toPx() &&
+                                        abs(box.height) >= 24.dp.toPx()
+                                    ) {
+                                        val first = transform.toNormalized(box.topLeft)
+                                        val second = transform.toNormalized(box.bottomRight)
+                                        onRefineRect(
+                                            min(first.x, second.x).toFloat(),
+                                            min(first.y, second.y).toFloat(),
+                                            max(first.x, second.x).toFloat(),
+                                            max(first.y, second.y).toFloat(),
+                                        )
+                                    }
+                                }
+                                return@awaitEachGesture
+                            }
+
                             val gripOffset = 36.dp.toPx()
                             val threshold = 48.dp.toPx()
                             val p1 = transform.toScreenNormalized(currentPin1) +
@@ -208,8 +263,34 @@ fun InteractiveCaliper(
                     objectGeometry = selectedObject,
                     transform = transform,
                     textMeasurer = textMeasurer,
-                    parallaxFactor = parallaxFactor,
                 )
+
+                refineRect?.let { box ->
+                    if (!refineMode) return@let
+                    val normalized = Rect(
+                        min(box.left, box.right),
+                        min(box.top, box.bottom),
+                        max(box.left, box.right),
+                        max(box.top, box.bottom),
+                    )
+                    drawRect(
+                        color = WorkshopPalette.Amber.copy(alpha = 0.10f),
+                        topLeft = normalized.topLeft,
+                        size = normalized.size,
+                    )
+                    drawRect(
+                        color = WorkshopPalette.Amber,
+                        topLeft = normalized.topLeft,
+                        size = normalized.size,
+                        style = Stroke(
+                            width = 2.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(
+                                floatArrayOf(8.dp.toPx(), 5.dp.toPx()),
+                                0f,
+                            ),
+                        ),
+                    )
+                }
 
                 drawCaliperPins(
                     pin1 = pin1,
@@ -217,8 +298,6 @@ fun InteractiveCaliper(
                     activePin = activePin,
                     transform = transform,
                     textMeasurer = textMeasurer,
-                    distanceMm = pinDistanceMm,
-                    errorMm = pinErrorMm,
                 )
 
                 if (activePin != null) {
@@ -235,6 +314,55 @@ fun InteractiveCaliper(
                         transform = transform,
                         textMeasurer = textMeasurer,
                     )
+                }
+            }
+
+            if (refineMode && !refining) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = WorkshopPalette.Background.copy(alpha = 0.86f),
+                    border = BorderStroke(1.dp, WorkshopPalette.Amber.copy(alpha = 0.7f)),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(10.dp),
+                ) {
+                    Text(
+                        text = "DRAW A BOX AROUND THE OBJECT",
+                        color = WorkshopPalette.Amber,
+                        fontFamily = Mono,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                        letterSpacing = 0.8.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    )
+                }
+            }
+
+            if (refining) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(WorkshopPalette.Background.copy(alpha = 0.72f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            color = WorkshopPalette.Amber,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(28.dp),
+                        )
+                        Text(
+                            text = "REFINING OBJECT",
+                            color = WorkshopPalette.Amber,
+                            fontFamily = Mono,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            letterSpacing = 1.0.sp,
+                        )
+                    }
                 }
             }
         }
@@ -487,13 +615,16 @@ private fun DrawScope.drawObjectAnnotations(
     objectGeometry: ObjectGeometry,
     transform: ViewTransform,
     textMeasurer: TextMeasurer,
-    parallaxFactor: Double,
 ) {
+    // Only compact numbered markers on the image. Hole dimensions and
+    // coordinates live in the scrollable Measurements card below.
     objectGeometry.holes.forEach { hole ->
         val centre = transform.toScreenMm(hole.centroid)
-        val radius = max(
-            3.dp.toPx(),
-            (hole.diameterMm / 2.0 * transform.pxPerMm * transform.scale).toFloat(),
+        val radius = 9.dp.toPx()
+        drawCircle(
+            color = WorkshopPalette.Amber.copy(alpha = 0.18f),
+            radius = radius,
+            center = centre,
         )
         drawCircle(
             color = WorkshopPalette.Amber,
@@ -501,49 +632,21 @@ private fun DrawScope.drawObjectAnnotations(
             center = centre,
             style = Stroke(width = 1.2.dp.toPx()),
         )
-        drawLine(
+        val style = TextStyle(
             color = WorkshopPalette.Amber,
-            start = Offset(centre.x - radius * 1.5f, centre.y),
-            end = Offset(centre.x + radius * 1.5f, centre.y),
-            strokeWidth = 1.dp.toPx(),
+            fontFamily = Mono,
+            fontWeight = FontWeight.Bold,
+            fontSize = 7.sp,
         )
-        drawLine(
-            color = WorkshopPalette.Amber,
-            start = Offset(centre.x, centre.y - radius * 1.5f),
-            end = Offset(centre.x, centre.y + radius * 1.5f),
-            strokeWidth = 1.dp.toPx(),
-        )
-    }
-
-    val pairs = if (objectGeometry.holes.size <= 6) {
-        objectGeometry.holeSpacings
-    } else {
-        objectGeometry.holeSpacings.filter { it.secondIndex == it.firstIndex + 1 }
-    }
-    pairs.forEachIndexed { pairIndex, spacing ->
-        val first = transform.toScreenMm(objectGeometry.holes[spacing.firstIndex].centroid)
-        val second = transform.toScreenMm(objectGeometry.holes[spacing.secondIndex].centroid)
-        drawLine(
-            color = WorkshopPalette.Amber.copy(alpha = 0.75f),
-            start = first,
-            end = second,
-            strokeWidth = 1.dp.toPx(),
-            pathEffect = PathEffect.dashPathEffect(
-                floatArrayOf(5.dp.toPx(), 4.dp.toPx()),
-                0f,
-            ),
-        )
-        val mid = Offset((first.x + second.x) / 2f, (first.y + second.y) / 2f)
-        drawChipLabel(
+        val measured = textMeasurer.measure("H${hole.index + 1}", style)
+        drawText(
             textMeasurer = textMeasurer,
-            text = Formats.mmWithError(
-                spacing.distanceMm * parallaxFactor,
-                spacing.errorMm * parallaxFactor,
-                digits = 1,
+            text = "H${hole.index + 1}",
+            topLeft = Offset(
+                centre.x - measured.size.width / 2f,
+                centre.y - measured.size.height / 2f,
             ),
-            x = mid.x,
-            y = mid.y + if (pairIndex % 2 == 0) -10.dp.toPx() else 12.dp.toPx(),
-            textColor = WorkshopPalette.Amber,
+            style = style,
         )
     }
 }
@@ -554,8 +657,6 @@ private fun DrawScope.drawCaliperPins(
     activePin: Int?,
     transform: ViewTransform,
     textMeasurer: TextMeasurer,
-    distanceMm: Double,
-    errorMm: Double,
 ) {
     val first = transform.toScreenNormalized(pin1)
     val second = transform.toScreenNormalized(pin2)
@@ -583,14 +684,6 @@ private fun DrawScope.drawCaliperPins(
         color = WorkshopPalette.Amber,
         active = activePin == 2,
         textMeasurer = textMeasurer,
-    )
-
-    drawChipLabel(
-        textMeasurer = textMeasurer,
-        text = Formats.mmWithError(distanceMm, errorMm),
-        x = (first.x + second.x) / 2f,
-        y = (first.y + second.y) / 2f - 20.dp.toPx(),
-        textColor = WorkshopPalette.Emerald,
     )
 }
 

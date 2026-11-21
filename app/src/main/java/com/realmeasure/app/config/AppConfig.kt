@@ -23,6 +23,8 @@ object AppConfig {
         const val FRAME_INTERVAL_MS = 160L
         /** Consecutive valid frames required before the still capture fires. */
         const val REQUIRED_CONSECUTIVE_FRAMES = 5
+        /** Debounce after returning from Success/Error before a new auto-capture. */
+        const val SCAN_COOLDOWN_MS = 500L
         /** Reject non-90-degree corners beyond this in the live tracker. */
         const val MAX_LIVE_TILT_DEG = 12.0
         /** Allowed relative aspect deviation from the reference's true ratio. */
@@ -54,10 +56,10 @@ object AppConfig {
     object Calibration {
         /** Downscale used only to find the reference in the still. */
         const val DETECT_MAX_WIDTH_PX = 1800
-        /** Hard cap for the decoded still to prevent OOM on 48-108 MP sensors. */
-        const val MAX_SOURCE_WIDTH_PX = 4096
+        /** Hard cap for the decoded still and the Mat conversion (longest side). */
+        const val MAX_SOURCE_SIDE_PX = 2048
         /** Largest flattened canvas; the px/mm scale is reduced if exceeded. */
-        const val MAX_CANVAS_PX = 4096
+        const val MAX_CANVAS_PX = 2400
         /** cornerSubPix window and stop criteria from the specification. */
         const val SUBPIX_WIN = 11.0
         const val SUBPIX_ITERATIONS = 30
@@ -77,11 +79,22 @@ object AppConfig {
         const val CANNY_LOW = 35.0
         const val CANNY_HIGH = 110.0
         const val CLOSE_KERNEL = 5
+        /** Background Lab color difference (0-255) used to seed the object mask. */
+        const val BG_COLOR_TOLERANCE = 18.0
+        /** Background luminance difference (0-255) used for hole pass-through. */
+        const val BG_LUMA_TOLERANCE = 14.0
+        /** Minimum mean color contrast for reliable background-colored hole detection. */
+        const val MIN_OBJECT_CONTRAST = 14.0
         /** Smallest object worth measuring. */
         const val MIN_OBJECT_AREA_MM2 = 20.0
         /** Guard against a hand/table blob being treated as an object. */
         const val MAX_OBJECT_AREA_MM2 = 4_000_000.0
-        const val MIN_HOLE_AREA_MM2 = 0.8
+        /** Real pass-through holes only; rejects printed text and specular spots. */
+        const val HOLE_MIN_AREA_MM2 = 2.5
+        const val HOLE_MIN_CIRCULARITY = 0.45
+        const val HOLE_MAX_OBJECT_FRACTION = 0.95
+        /** GrabCut refinement iterations. */
+        const val GRABCUT_ITERATIONS = 3
         /** SVG polygon simplification tolerance. */
         const val SVG_EPSILON_MM = 0.25
         /** Objects touching the warped canvas border are incomplete. */

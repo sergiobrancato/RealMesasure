@@ -29,17 +29,26 @@ import kotlin.math.roundToInt
  *  4. build H0 that maps the reference to an exact W_ref x H_ref metric plane,
  *  5. project the full image corners with Core.perspectiveTransform,
  *  6. translate H0 so the full scene (not just the reference) is preserved,
- *  7. warp the whole image at s px/mm, clamping the canvas to 4096 px.
+ *  7. warp the whole image at s px/mm, clamping the canvas to 2400 px.
+ *
+ * The incoming still is downscaled so its longest side is at most
+ * [AppConfig.Calibration.MAX_SOURCE_SIDE_PX] *before* it becomes a Mat. All
+ * corner detection, sub-pixel refinement and homography coordinates therefore
+ * live in that single scaled frame, so repeated scans cannot exhaust the native
+ * or Java heap.
  *
  * Every pixel of the returned bitmap is exactly 1 / pixelsPerMm millimetres.
  */
 object PrecisionCalibrator {
 
     fun calibrate(still: Bitmap, mode: ReferenceMode): CalibrationResult {
-        val maxSource = AppConfig.Calibration.MAX_SOURCE_WIDTH_PX
-        val sourceBitmap = if (still.width > maxSource) {
-            val height = (still.height.toDouble() * maxSource / still.width).roundToInt()
-            Bitmap.createScaledBitmap(still, maxSource, height.coerceAtLeast(1), true)
+        val maxSide = AppConfig.Calibration.MAX_SOURCE_SIDE_PX
+        val longest = max(still.width, still.height)
+        val scale = if (longest > maxSide) maxSide.toDouble() / longest else 1.0
+        val sourceBitmap = if (scale < 1.0) {
+            val width = (still.width * scale).roundToInt().coerceAtLeast(1)
+            val height = (still.height * scale).roundToInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(still, width, height, true)
         } else {
             still
         }

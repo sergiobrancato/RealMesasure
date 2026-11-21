@@ -13,6 +13,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -88,6 +89,7 @@ import com.realmeasure.app.ui.components.ScannerOverlay
 import com.realmeasure.app.ui.theme.Mono
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.Executors
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
@@ -163,6 +165,7 @@ fun ScannerScreen(
                     onStill = viewModel::onStillCaptured,
                     onCaptureFailed = viewModel::onCaptureFailed,
                     onTorch = viewModel::toggleTorch,
+                    onTorchReset = { viewModel.setTorch(false) },
                 )
             } else {
                 PermissionRationale(
@@ -196,6 +199,8 @@ fun ScannerScreen(
         is ScanUiState.Success -> ResultScreen(
             analysis = scan.analysis,
             scansViewModel = scansViewModel,
+            refining = ui.refining,
+            onRefine = viewModel::refineObject,
             onScanAnother = viewModel::resumeScanning,
         )
         is ScanUiState.Error -> ErrorModal(
@@ -321,6 +326,7 @@ private fun CameraStage(
     onStill: (Bitmap, Long) -> Unit,
     onCaptureFailed: (String, Long) -> Unit,
     onTorch: () -> Unit,
+    onTorchReset: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -361,16 +367,53 @@ private fun CameraStage(
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
             .build()
     }
     val lastAnalyzedAt = remember { AtomicLong(0L) }
     val isFrameBusy = remember { AtomicBoolean(false) }
     val capturing = remember { AtomicBoolean(false) }
+    val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
     var provider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var bindAttempt by remember { mutableIntStateOf(0) }
+    val latestCamera = rememberUpdatedState(camera)
+
+    /** Guarded torch call: ignores lifecycle cancellation and never touches the UI thread. */
+    fun applyTorch(target: Camera?, enabled: Boolean) {
+        if (target == null || !target.cameraInfo.hasFlashUnit()) return
+        // Torch and capture flash must never compete for the same flash unit.
+        try {
+            imageCapture.flashMode = ImageCapture.FLASH_MODE_OFF
+        } catch (exception: Exception) {
+            // The capture use case can be detached while the camera unbinds.
+        }
+        try {
+            val future = target.cameraControl.enableTorch(enabled)
+            future.addListener(
+                {
+                    try {
+                        future.get()
+                    } catch (exception: ExecutionException) {
+                        // CameraControl.OperationCanceledException is expected when
+                        // the camera unbinds or a newer torch request supersedes this one.
+                        if (exception.cause !is CameraControl.OperationCanceledException) {
+                            android.util.Log.w("RealMeasureTorch", "Torch operation failed", exception)
+                        }
+                    } catch (exception: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    } catch (exception: Exception) {
+                        // Camera closed between the check and the call.
+                    }
+                },
+                mainExecutor,
+            )
+        } catch (exception: Exception) {
+            // Camera was unbound between the guard and enableTorch().
+        }
+    }
 
     val latestScanState = rememberUpdatedState(scanState)
     val latestOnFrame = rememberUpdatedState(onFrame)
@@ -425,7 +468,7 @@ private fun CameraStage(
     }
 
     LaunchedEffect(torchOn, camera) {
-        camera?.cameraControl?.enableTorch(torchOn)
+        applyTorch(camera, torchOn)
     }
 
     // Full-resolution capture triggered by the stability lock.
@@ -491,6 +534,8 @@ private fun CameraStage(
 
     DisposableEffect(Unit) {
         onDispose {
+            applyTorch(latestCamera.value, false)
+            onTorchReset()
             imageAnalysis.clearAnalyzer()
             provider?.unbindAll()
             analysisExecutor.shutdown()
@@ -519,29 +564,30 @@ private fun CameraStage(
                 scanning = scanning,
             )
 
-            Surface(
-                shape = CircleShape,
-                color = WorkshopPalette.Background.copy(alpha = 0.72f),
-                border = BorderStroke(1.dp, WorkshopPalette.Border),
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp),
-            ) {
-                IconButton(
-                    onClick = onTorch,
-                    enabled = hasFlash,
-                    modifier = Modifier.size(40.dp),
+            if (hasFlash) {
+                Surface(
+                    shape = CircleShape,
+                    color = WorkshopPalette.Background.copy(alpha = 0.72f),
+                    border = BorderStroke(1.dp, WorkshopPalette.Border),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp),
                 ) {
-                    Icon(
-                        imageVector = if (torchOn) {
-                            Icons.Filled.FlashlightOn
-                        } else {
-                            Icons.Filled.FlashlightOff
-                        },
-                        contentDescription = if (torchOn) "Turn torch off" else "Turn torch on",
-                        tint = if (torchOn) WorkshopPalette.Amber else WorkshopPalette.TextMuted,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    IconButton(
+                        onClick = onTorch,
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (torchOn) {
+                                Icons.Filled.FlashlightOn
+                            } else {
+                                Icons.Filled.FlashlightOff
+                            },
+                            contentDescription = if (torchOn) "Turn torch off" else "Turn torch on",
+                            tint = if (torchOn) WorkshopPalette.Amber else WorkshopPalette.TextMuted,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
 
@@ -797,7 +843,7 @@ private fun ImageProxy.toUprightStageBitmap(): Bitmap? {
  *
  * JPEG stills are decoded with a power-of-two inSampleSize so a 48–108 MP
  * sensor never allocates a full-size ARGB bitmap. The decoded long edge is
- * capped at [AppConfig.Calibration.MAX_SOURCE_WIDTH_PX] pixels, which is still
+ * capped at [AppConfig.Calibration.MAX_SOURCE_SIDE_PX] pixels, which is still
  * far more resolution than the 4096 px warp canvas can use.
  */
 private fun ImageProxy.toUprightBitmap(): Bitmap? {
@@ -832,7 +878,7 @@ private fun ImageProxy.decodeJpegSampled(): Bitmap? {
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
-    val maxEdge = AppConfig.Calibration.MAX_SOURCE_WIDTH_PX
+    val maxEdge = AppConfig.Calibration.MAX_SOURCE_SIDE_PX
     var sample = 1
     while (bounds.outWidth / sample > maxEdge || bounds.outHeight / sample > maxEdge) {
         sample *= 2

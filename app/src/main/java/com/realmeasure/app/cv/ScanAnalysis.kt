@@ -12,4 +12,8 @@ data class ScanAnalysis(
     val calibration: CalibrationResult,
     val objects: List<ObjectGeometry>,
     val selectedIndex: Int = 0,
+    /** Capture token, used to keep result-screen state stable across refinements. */
+    val token: Long = 0L,
+    /** Incremented when the object geometry is refined (GrabCut). */
+    val revision: Int = 0,
 )

@@ -2,6 +2,8 @@ package com.realmeasure.app.ui
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,6 +11,7 @@ import com.realmeasure.app.config.AppConfig
 import com.realmeasure.app.cv.CalibrationException
 import com.realmeasure.app.cv.Geometry
 import com.realmeasure.app.cv.IrregularShapeAnalyzer
+import com.realmeasure.app.cv.PixelRect
 import com.realmeasure.app.cv.PrecisionCalibrator
 import com.realmeasure.app.cv.ReferenceDetector
 import com.realmeasure.app.cv.ScanAnalysis
@@ -79,6 +82,8 @@ data class ScannerUi(
     val scan: ScanUiState,
     val mode: ReferenceMode = ReferenceMode.CARD,
     val torch: Boolean = false,
+    /** True while a GrabCut refinement is running on the result screen. */
+    val refining: Boolean = false,
 )
 
 /**
@@ -98,11 +103,15 @@ class ScannerViewModel : ViewModel() {
 
     private val isFrameBusy = AtomicBoolean(false)
     private val stillInFlight = AtomicBoolean(false)
+    private val refineInFlight = AtomicBoolean(false)
     private val nextToken = AtomicLong(0L)
+    private val refineGeneration = AtomicLong(0L)
 
     private var watchdogJob: Job? = null
+    private var refineWatchdog: Job? = null
     private var lastFrameAt = 0L
     private var consecutiveValid = 0
+    private var cooldownUntil = 0L
 
     @Volatile
     private var externallyPaused = false
@@ -119,25 +128,40 @@ class ScannerViewModel : ViewModel() {
     fun setMode(newMode: ReferenceMode) {
         if (newMode == _ui.value.mode) return
         cancelWatchdog()
+        invalidateRefinement()
+        releaseCurrentSuccessBitmap()
         stillInFlight.set(false)
+        cooldownUntil = SystemClock.elapsedRealtime() + AppConfig.Detection.SCAN_COOLDOWN_MS
         consecutiveValid = 0
         _ui.update {
             it.copy(
                 mode = newMode,
                 scan = searchingState(newMode),
+                refining = false,
             )
         }
     }
 
-    fun toggleTorch() = _ui.update { it.copy(torch = !it.torch) }
+    fun setTorch(enabled: Boolean) {
+        if (_ui.value.torch == enabled) return
+        _ui.update { it.copy(torch = enabled) }
+    }
+
+    fun toggleTorch() = setTorch(!_ui.value.torch)
 
     /** Called by "Scan Another" / "Try Again". */
     fun resumeScanning() {
         cancelWatchdog()
+        invalidateRefinement()
+        releaseCurrentSuccessBitmap()
         stillInFlight.set(false)
+        cooldownUntil = SystemClock.elapsedRealtime() + AppConfig.Detection.SCAN_COOLDOWN_MS
         consecutiveValid = 0
         _ui.update {
-            it.copy(scan = searchingState(it.mode))
+            it.copy(
+                scan = searchingState(it.mode),
+                refining = false,
+            )
         }
     }
 
@@ -221,12 +245,14 @@ class ScannerViewModel : ViewModel() {
                     if (isCurrentAnalyzing(token)) {
                         _ui.update {
                             it.copy(
+                                torch = false,
                                 scan = ScanUiState.Success(
                                     analysis = ScanAnalysis(
                                         mode = mode,
                                         calibration = calibration,
                                         objects = objects,
                                         selectedIndex = 0,
+                                        token = token,
                                     ),
                                 ),
                             )
@@ -279,7 +305,102 @@ class ScannerViewModel : ViewModel() {
 
     override fun onCleared() {
         cancelWatchdog()
+        refineWatchdog?.cancel()
+        val bitmap = (_ui.value.scan as? ScanUiState.Success)
+            ?.analysis?.calibration?.warpedBitmap
+        if (bitmap != null && !bitmap.isRecycled) {
+            bitmap.recycle()
+        }
         super.onCleared()
+    }
+
+    /**
+     * GrabCut refinement of one object on the existing flattened canvas.
+     * The rectangle is normalised to the image (0..1).
+     */
+    fun refineObject(index: Int, left: Float, top: Float, right: Float, bottom: Float) {
+        val state = _ui.value.scan as? ScanUiState.Success ?: return
+        val analysis = state.analysis
+        if (index !in analysis.objects.indices) return
+        val bitmap = analysis.calibration.warpedBitmap
+        if (bitmap.isRecycled) return
+
+        val x1 = (minOf(left, right).coerceIn(0f, 1f) * bitmap.width).toInt()
+        val x2 = (maxOf(left, right).coerceIn(0f, 1f) * bitmap.width).toInt()
+        val y1 = (minOf(top, bottom).coerceIn(0f, 1f) * bitmap.height).toInt()
+        val y2 = (maxOf(top, bottom).coerceIn(0f, 1f) * bitmap.height).toInt()
+        val rect = PixelRect(
+            left = x1.coerceIn(0, bitmap.width - 2),
+            top = y1.coerceIn(0, bitmap.height - 2),
+            right = x2.coerceIn(1, bitmap.width),
+            bottom = y2.coerceIn(1, bitmap.height),
+        )
+        if (rect.width < 12 || rect.height < 12) return
+        if (!refineInFlight.compareAndSet(false, true)) return
+
+        val generation = refineGeneration.incrementAndGet()
+        _ui.update { it.copy(refining = true) }
+        refineWatchdog?.cancel()
+        refineWatchdog = viewModelScope.launch {
+            delay(SCAN_TIMEOUT_MS)
+            if (refineGeneration.get() == generation) {
+                refineGeneration.incrementAndGet()
+                refineInFlight.set(false)
+                _ui.update { it.copy(refining = false) }
+            }
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val refined = withTimeout(SCAN_TIMEOUT_MS) {
+                    IrregularShapeAnalyzer.refineWithGrabCut(
+                        warped = bitmap,
+                        calibration = analysis.calibration,
+                        rect = rect,
+                    ).copy(index = index)
+                }
+                val current = _ui.value.scan as? ScanUiState.Success
+                if (refineGeneration.get() == generation &&
+                    current != null &&
+                    current.analysis.token == analysis.token &&
+                    !bitmap.isRecycled
+                ) {
+                    val objects = current.analysis.objects.toMutableList()
+                    if (index in objects.indices) {
+                        objects[index] = refined
+                        _ui.update {
+                            it.copy(
+                                scan = ScanUiState.Success(
+                                    analysis = current.analysis.copy(
+                                        objects = objects,
+                                        revision = current.analysis.revision + 1,
+                                    ),
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (exception: TimeoutCancellationException) {
+                // Keep the previous geometry; the user can redraw a tighter box.
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (throwable: Throwable) {
+                // GrabCut can fail on a box that cuts through the object.
+            } finally {
+                if (refineGeneration.get() == generation) {
+                    refineInFlight.set(false)
+                    refineWatchdog?.cancel()
+                    _ui.update { it.copy(refining = false) }
+                }
+            }
+        }
+    }
+
+    /** Invalidate any in-flight GrabCut when leaving the result screen. */
+    private fun invalidateRefinement() {
+        refineGeneration.incrementAndGet()
+        refineWatchdog?.cancel()
+        refineWatchdog = null
+        refineInFlight.set(false)
     }
 
     // ------------------------------------------------------------------
@@ -288,6 +409,15 @@ class ScannerViewModel : ViewModel() {
 
     private fun inspectPreview(frame: Bitmap, mode: ReferenceMode) {
         if (externallyPaused || _ui.value.scan !is ScanUiState.Scanning) return
+
+        val now = SystemClock.elapsedRealtime()
+        if (now < cooldownUntil) {
+            consecutiveValid = 0
+            _ui.update {
+                it.copy(scan = searchingState(mode))
+            }
+            return
+        }
 
         val detection = ReferenceDetector.detect(
             bitmap = frame,
@@ -402,6 +532,18 @@ class ScannerViewModel : ViewModel() {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /** Free the previous flattened bitmap after the result dialog has left composition. */
+    private fun releaseCurrentSuccessBitmap() {
+        val bitmap = (_ui.value.scan as? ScanUiState.Success)
+            ?.analysis?.calibration?.warpedBitmap
+            ?: return
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!bitmap.isRecycled) {
+                bitmap.recycle()
+            }
+        }, 200L)
+    }
 
     private fun searchingState(mode: ReferenceMode) = ScanUiState.Scanning(
         referenceDetected = false,

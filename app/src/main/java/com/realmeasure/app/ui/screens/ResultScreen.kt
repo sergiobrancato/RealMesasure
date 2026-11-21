@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -70,6 +71,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -86,6 +88,8 @@ import kotlin.math.roundToInt
 fun ResultScreen(
     analysis: ScanAnalysis,
     scansViewModel: ScansViewModel,
+    refining: Boolean,
+    onRefine: (index: Int, left: Float, top: Float, right: Float, bottom: Float) -> Unit,
     onScanAnother: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -97,18 +101,20 @@ fun ResultScreen(
     val canvasWidthMm = bitmap.width / pixelsPerMm
     val canvasHeightMm = bitmap.height / pixelsPerMm
     val saving by scansViewModel.saving.collectAsStateWithLifecycle()
+    val busy = saving || refining
 
-    var selectedIndex by remember(analysis) {
+    var selectedIndex by remember(analysis.token) {
         mutableStateOf(analysis.selectedIndex.coerceIn(0, analysis.objects.lastIndex))
     }
     val selectedObject = analysis.objects[selectedIndex]
     val initial = initialPins(selectedObject, canvasWidthMm, canvasHeightMm)
 
-    var pin1 by remember(analysis) { mutableStateOf(initial.first) }
-    var pin2 by remember(analysis) { mutableStateOf(initial.second) }
-    var objectHeightMm by remember(analysis) { mutableFloatStateOf(0f) }
+    var pin1 by remember(analysis.token) { mutableStateOf(initial.first) }
+    var pin2 by remember(analysis.token) { mutableStateOf(initial.second) }
+    var objectHeightMm by remember(analysis.token) { mutableFloatStateOf(0f) }
     var heightExpanded by remember { mutableStateOf(false) }
-    var saved by remember(analysis) { mutableStateOf(false) }
+    var refineMode by remember(analysis.token) { mutableStateOf(false) }
+    var saved by remember(analysis.token) { mutableStateOf(false) }
 
     LaunchedEffect(selectedIndex) {
         val pins = initialPins(
@@ -120,6 +126,13 @@ fun ResultScreen(
         pin2 = pins.second
         objectHeightMm = 0f
         saved = false
+    }
+
+    LaunchedEffect(analysis.revision) {
+        saved = false
+        if (analysis.revision > 0) {
+            refineMode = false
+        }
     }
 
     val parallaxFactor = ErrorEstimator.parallaxFactor(objectHeightMm.toDouble())
@@ -147,7 +160,7 @@ fun ResultScreen(
     )
 
     Dialog(
-        onDismissRequest = onScanAnother,
+        onDismissRequest = { if (!busy) onScanAnother() },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             dismissOnClickOutside = false,
@@ -167,7 +180,8 @@ fun ResultScreen(
                 ResultHeader(
                     modeLabel = mode.label,
                     pixelsPerMm = pixelsPerMm,
-                    onClose = onScanAnother,
+                    onClose = { if (!busy) onScanAnother() },
+                    closeEnabled = !busy,
                 )
 
                 Column(
@@ -188,9 +202,38 @@ fun ResultScreen(
                         pinDistanceMm = pinDistance,
                         pinErrorMm = pinError,
                         parallaxFactor = parallaxFactor,
+                        refineMode = refineMode && !refining,
+                        refining = refining,
+                        onRefineRect = { left, top, right, bottom ->
+                            onRefine(selectedIndex, left, top, right, bottom)
+                        },
                     )
 
-                    if (analysis.objects.size > 1) {
+                    SecondaryAction(
+                        text = when {
+                            refining -> "REFINING OBJECT..."
+                            refineMode -> "CANCEL REFINE"
+                            else -> "REFINE OBJECT (DRAW BOX)"
+                        },
+                        accent = if (refineMode) WorkshopPalette.Amber else WorkshopPalette.Cyan,
+                        enabled = !busy,
+                        onClick = { refineMode = !refineMode },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    if (refineMode && !refining) {
+                        Text(
+                            text = "Drag a rectangle around the object. GrabCut will snap the " +
+                                "silhouette and recalculate the bounding box, area and perimeter.",
+                            color = WorkshopPalette.TextMuted,
+                            fontSize = 10.sp,
+                            lineHeight = 15.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    if (analysis.objects.size > 1 && !busy) {
                         ObjectSelector(
                             objects = analysis.objects,
                             selectedIndex = selectedIndex,
@@ -234,7 +277,7 @@ fun ResultScreen(
                                 else -> "SAVE TO MY SCANS"
                             },
                             onClick = {
-                                if (saved || saving) return@PrimaryAction
+                                if (saved || busy) return@PrimaryAction
                                 scope.launch {
                                     val annotated = withContext(Dispatchers.Default) {
                                         AnalysisRenderer.renderAnnotated(
@@ -251,12 +294,13 @@ fun ResultScreen(
                                     ) { saved = true }
                                 }
                             },
-                            enabled = !saved && !saving,
+                            enabled = !saved && !busy,
                             modifier = Modifier.weight(1f),
                         )
                         SecondaryAction(
                             text = "EXPORT 1:1 SVG",
                             accent = WorkshopPalette.Cyan,
+                            enabled = !busy,
                             onClick = {
                                 SvgExporter.exportAndShare(
                                     context = context,
@@ -272,6 +316,7 @@ fun ResultScreen(
 
                     SecondaryAction(
                         text = "SCAN ANOTHER",
+                        enabled = !busy,
                         onClick = onScanAnother,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -292,6 +337,7 @@ private fun ResultHeader(
     modeLabel: String,
     pixelsPerMm: Double,
     onClose: () -> Unit,
+    closeEnabled: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -313,7 +359,7 @@ private fun ResultHeader(
                 letterSpacing = 1.1.sp,
             )
         }
-        IconButton(onClick = onClose) {
+        IconButton(onClick = onClose, enabled = closeEnabled) {
             Icon(
                 imageVector = Icons.Filled.Close,
                 contentDescription = "Close result",
@@ -546,6 +592,11 @@ private fun HeightParallaxCard(
                 )
             }
 
+            HeightPresetRow(
+                heightMm = heightMm,
+                onHeightChange = onHeightChange,
+            )
+
             if (expanded) {
                 Column(
                     modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
@@ -623,6 +674,51 @@ private fun HeightParallaxCard(
     }
 }
 
+@Composable
+private fun HeightPresetRow(
+    heightMm: Float,
+    onHeightChange: (Float) -> Unit,
+) {
+    val presets = listOf(
+        0f to "Flat 0 mm",
+        10f to "10 mm",
+        20f to "20 mm",
+        30f to "30 mm",
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        presets.forEach { (value, label) ->
+            val selected = abs(heightMm - value) < 0.5f
+            Surface(
+                onClick = { onHeightChange(value) },
+                shape = RoundedCornerShape(50),
+                color = if (selected) {
+                    WorkshopPalette.Amber.copy(alpha = 0.16f)
+                } else {
+                    WorkshopPalette.Sunken
+                },
+                border = BorderStroke(
+                    1.dp,
+                    if (selected) WorkshopPalette.Amber else WorkshopPalette.Border,
+                ),
+            ) {
+                Text(
+                    text = label,
+                    color = if (selected) WorkshopPalette.Amber else WorkshopPalette.TextMuted,
+                    fontFamily = Mono,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hole / spacing / calibration detail
 // ---------------------------------------------------------------------------
@@ -643,7 +739,7 @@ private fun SpecCard(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SectionLabel("GEOMETRY DETAIL", WorkshopPalette.TextMuted)
+            SectionLabel("MEASUREMENTS", WorkshopPalette.TextMuted)
 
             if (objectGeometry.holes.isNotEmpty()) {
                 SectionLabel("HOLE CENTRES · Ø", WorkshopPalette.Amber)
